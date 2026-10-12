@@ -14,15 +14,15 @@ __pycache__/
 .venv/
 venv/
 
-# 本地数据
+# 本地数据与日志
 data/
 *.db
 *.sqlite3
 logs/
+*.log
 
 # IDE / 系统
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-*.log

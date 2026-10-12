@@ -37,12 +37,16 @@ def setup_logging(level: str | None = None, log_file: str | None = None) -> None
     # 滚动文件(可选)
     if log_file:
         path = Path(log_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-        )
-        file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
+        # 防御:若 path 指向的是已存在目录(而非文件),跳过文件日志而非崩溃
+        if path.exists() and path.is_dir():
+            print(f"[logging] 警告: LOG_FILE 指向了目录而非文件,已跳过文件日志: {log_file}")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            )
+            file_handler.setFormatter(formatter)
+            root.addHandler(file_handler)
 
     # 降噪:降低第三方库的冗余日志
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

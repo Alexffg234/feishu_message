@@ -78,12 +78,12 @@ else
   echo "config/.env 已存在,跳过"
 fi
 
-# 确保运行用户 www-data 有权限
-chown -R www-data:www-data "$DEST" 2>/dev/null || true
+# 确保项目目录属于 root（脚本以 root 运行）
+chown -R root:root "$DEST" 2>/dev/null || true
 
 # ---------- 6. 初始化数据库 ----------
 echo "[6/8] 初始化数据库表..."
-sudo -u www-data bash -c "cd $DEST && .venv/bin/python scripts/init_db.py"
+( cd "$DEST" && .venv/bin/python scripts/init_db.py )
 
 # ---------- 7. 安装 systemd 服务 ----------
 echo "[7/8] 安装 systemd 服务..."

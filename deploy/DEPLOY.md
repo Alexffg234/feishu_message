@@ -222,7 +222,7 @@ systemctl status feishu-message
 | 回调校验失败 | Nginx 生效？HTTPS 证书正常？`/feishu/event` 路径对？服务在 8008 `curl 127.0.0.1:8008/health` OK？ |
 | 服务起不来 | `journalctl -u feishu-message -e` 看报错，多因 `.env` 或数据库 |
 | 收不到消息 | 应用是否**重新发布**？机器人是否在群里？权限审批是否通过？ |
-| 权限报错 | 确保项目目录属主是 `www-data`：`chown -R www-data:www-data /opt/feishu_group_message` |
+| 权限报错 | 服务默认以 root 运行。若改用低权限用户，需确保项目目录属主一致：`chown -R <user>:<group> /opt/feishu_group_message` |
 
 ---
 

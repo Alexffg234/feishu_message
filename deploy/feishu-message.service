@@ -23,8 +23,10 @@ ExecStart=/opt/feishu_group_message/.venv/bin/gunicorn app.main:app \
 # 安全与资源
 Restart=always
 RestartSec=5
-User=www-data
-Group=www-data
+# 默认以 root 运行(避免系统缺少专用用户导致启动失败)
+# 如需专用低权限用户,可改为 User=feishu / Group=feishu 并确保目录属主一致
+#User=www-data
+#Group=www-data
 UMask=0027
 
 # 简单沙箱加固

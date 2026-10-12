@@ -14,18 +14,22 @@
 ## 项目结构
 
 ```
-feishu_group_message/
-├── main.py               # 主入口: FastAPI 服务,承载事件回调
-├── requirements.txt      # 依赖
-├── read_messages.py      # 查看/导出已采集消息
+feishu_message/
+├── run.py                  # 启动入口
+├── requirements.txt        # 依赖
 ├── config/
-│   ├── .env.example      # 配置模板(复制为 .env)
-│   └── config.py         # 配置加载
-├── app/
-│   ├── handler.py        # 消息事件解析与处理
-│   └── store.py          # 消息落盘(JSON Lines)
-└── storage/
-    └── messages.jsonl    # 采集到的消息(运行时生成)
+│   └── .env.example        # 配置模板(复制为 .env)
+├── scripts/
+│   ├── init_db.py          # 初始化数据库
+│   └── query_messages.py   # 查看/导出/分组查询已采集消息
+└── app/
+    ├── main.py             # FastAPI 应用工厂
+    ├── api/routes.py       # HTTP 路由(事件回调 + 查询接口)
+    ├── core/               # 配置 / 数据库 / 日志
+    ├── models/message.py   # 消息 ORM 模型
+    ├── schemas/message.py  # Pydantic schema
+    ├── dao/message_repo.py # 数据访问层
+    └── services/           # 事件处理 / 业务逻辑(含分组)
 ```
 
 ## 快速开始
@@ -77,10 +81,47 @@ python main.py
 ### 6. 查看消息
 
 ```bash
-python read_messages.py            # 打印最近100条
-python read_messages.py --limit 20
-python read_messages.py --json export.json   # 导出为JSON
+python scripts/query_messages.py                 # 打印最近100条
+python scripts/query_messages.py --limit 20      # 最近20条
+python scripts/query_messages.py --chat oc_xxx   # 按群过滤
+python scripts/query_messages.py --groups        # 按回复链分组输出
+python scripts/query_messages.py --topics        # 按 LLM 主题聚合输出
+python scripts/query_messages.py --reclassify    # 对未分类的组重新调 LLM 打标签
+python scripts/query_messages.py --json export.json   # 导出为JSON
 ```
+
+## 消息分组(回复链)
+
+按「回复链」把消息归组:**A 发一条消息,B 回复 A(或 C 再回复 B),归为同一组**。
+
+- 飞书回复消息的 `im.message.receive_v1` 事件自带 `parent_id`(被回复消息)与 `root_id`(回复链根)。
+- 入库时冗余计算 `root_message_id` 作为分组键:独立消息 `root=自身`;回复消息沿父链归到同一根。
+- 父消息未被采集到(如机器人入群前发的)时,以被回复消息为分组锚点。
+
+HTTP 查询:
+
+```
+GET /messages/groups?chat_id=oc_xxx&limit=20
+```
+
+返回每组 `{root_message_id, chat_id, root, replies, message_count, senders}`。
+
+## 主题分类(LLM)
+
+在回复链分组之上再按「主题」聚合:把讨论同一类问题(如「投屏」「远场语音唤不醒」)的所有问答组聚到一个主题下,形成 **主题 → 回复链组 → 消息** 三层结构。
+
+- 每个回复链组入库后,由**后台线程**调用 LLM(OpenAI 兼容接口)打一个 2~10 字的主题标签,不阻塞消息落库。
+- 分类时把库里**已有主题列表**一并传给 LLM,同义话题沿用同一标签,保证聚合稳定。
+- 在 `config/.env` 配置 `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` 启用;留空则禁用(消息正常入库,只是不归类)。
+- 未分类的历史组可用 `python scripts/query_messages.py --reclassify` 补打标签。
+
+HTTP 查询:
+
+```
+GET /messages/topics?chat_id=oc_xxx&limit=20
+```
+
+返回每个主题 `{topic, group_count, message_count, senders, groups:[...]}`。
 
 ## 鉴权提示
 

@@ -2,12 +2,15 @@
 
 职责:接收飞书事件回调,解析出结构化消息,并通过 DAO 落库。
 含防重(chat_id+message_id)与群白名单过滤。
+
+分组:A 发消息、B 回复 A(事件带 parent_id/root_id),两者归为同一组,
+组内共享 root_message_id(回复链的根消息 id)。
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
@@ -23,10 +26,17 @@ _TEXT_TYPES = {"text", "post"}
 
 
 class MessageService:
-    def __init__(self, session: Session, allowed_chat_ids: set[str] | None = None):
+    def __init__(
+        self,
+        session: Session,
+        allowed_chat_ids: set[str] | None = None,
+        topic_scheduler: Callable[[str, str], None] | None = None,
+    ):
         self._session = session
         self._allowed = allowed_chat_ids or set()
         self._repo = MessageRepo(session)
+        # 入库后回调 (chat_id, root_message_id),用于调度异步主题分类
+        self._topic_scheduler = topic_scheduler
 
     # ---------------------------------------------------------------- 对外
     def handle_receive_event(self, data: P2ImMessageReceiveV1) -> bool:
@@ -50,6 +60,10 @@ class MessageService:
         # 解析消息内容
         text, raw = _parse_content(msg.message_type or "", msg.content or "")
 
+        # 解析回复关系(仅回复消息带 parent_id / root_id)
+        parent_id = getattr(msg, "parent_id", None) or ""
+        root_id = getattr(msg, "root_id", None) or ""
+
         create = MessageCreate(
             message_id=msg.message_id or "",
             chat_id=chat_id,
@@ -57,13 +71,63 @@ class MessageService:
             sender_type=sender_type,
             message_type=msg.message_type or "",
             text=text,
-            create_time=getattr(msg, "create_time", None) or "",
+            # SDK 将 create_time 解析为 int,统一转 str 落库
+            create_time=str(getattr(msg, "create_time", None) or ""),
+            parent_message_id=parent_id,
+            root_message_id=root_id,
             raw=raw,
         )
 
         return self._save(create)
 
+    def list_groups(self, chat_id: str | None = None, limit: int = 50) -> list[dict]:
+        """按回复链分组返回最近的消息组。
+
+        每组: {root_message_id, chat_id, root, replies, message_count, senders}。
+        独立消息自成一组;A 发消息 B 回复,归为同一组。
+        """
+        groups: list[dict] = []
+        for root_id, group_chat in self._repo.list_roots(
+            chat_id=chat_id, limit=limit
+        ):
+            rows = self._repo.list_by_root(root_id, group_chat)
+            root_row = next((m for m in rows if m.message_id == root_id), None)
+            replies = [m for m in rows if m.message_id != root_id]
+            senders: list[str] = []
+            for m in rows:
+                if m.sender_id and m.sender_id not in senders:
+                    senders.append(m.sender_id)
+            groups.append(
+                {
+                    "root_message_id": root_id,
+                    "chat_id": group_chat,
+                    "root": root_row,
+                    "replies": replies,
+                    "message_count": len(rows),
+                    "senders": senders,
+                }
+            )
+        return groups
+
     # ---------------------------------------------------------------- 内部
+    def _resolve_root(self, create: MessageCreate) -> str:
+        """确定消息所属分组的根消息 id。
+
+        - 独立消息(无 parent):根=自身
+        - 回复消息:优先取父消息已落库的 root(保证多级回复归到同一根);
+          父消息未采集到(如机器人入群前)时,回退用事件 root_id,再回退用 parent_id。
+        """
+        if not create.parent_message_id:
+            return create.message_id
+
+        parent = self._repo.get_by_message_id(
+            create.chat_id, create.parent_message_id
+        )
+        if parent is not None:
+            return parent.root_message_id or parent.message_id
+        # 父消息不在库中:用事件携带的 root_id,否则以被回复消息为分组锚点
+        return create.root_message_id or create.parent_message_id
+
     def _save(self, create: MessageCreate) -> bool:
         """落库并防重。返回 True 表示新写入,False 表示重复跳过。"""
         # 防重:同一 chat+message 不重复入库
@@ -79,6 +143,8 @@ class MessageService:
             message_type=create.message_type,
             text=create.text,
             create_time=create.create_time,
+            parent_message_id=create.parent_message_id,
+            root_message_id=self._resolve_root(create),
             raw=create.raw,
         )
         try:
@@ -91,6 +157,12 @@ class MessageService:
                 create.message_type,
                 create.text[:80],
             )
+            # 异步调度主题分类(不阻塞入库)
+            if self._topic_scheduler is not None:
+                try:
+                    self._topic_scheduler(create.chat_id, msg.root_message_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("调度主题分类失败(不影响入库)")
             return True
         except Exception:  # noqa: BLE001  (唯一索引竞态等)
             self._session.rollback()

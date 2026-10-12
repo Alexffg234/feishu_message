@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     #   postgresql+psycopg://user:pwd@host:5432/dbname  (生产)
     database_url: str = f"sqlite:///{(BASE_DIR / 'data' / 'messages.db').as_posix()}"
 
+    # ---------- LLM 主题分类(OpenAI 兼容接口) ----------
+    # 任意提供 /chat/completions 的服务均可(OpenAI / Haier model / vLLM ...)
+    # api_key 为空时自动禁用主题分类,消息仍正常入库(只是不归类)。
+    llm_api_base: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout: int = 30
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)
@@ -65,6 +73,11 @@ class Settings(BaseSettings):
     def is_ready(self) -> bool:
         """核心凭据是否就绪(用于启动自检与健康检查)。"""
         return bool(self.app_id and self.app_secret and self.verification_token)
+
+    @property
+    def llm_enabled(self) -> bool:
+        """LLM 主题分类是否可用(api_key 与 model 均配置)。"""
+        return bool(self.llm_api_key and self.llm_model)
 
 
 @lru_cache

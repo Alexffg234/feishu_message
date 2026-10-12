@@ -5,11 +5,14 @@
 - GET /health     存活探针(Deployment 健康检查)
 - GET /ready     就绪探针(数据库连通)
 - POST /feishu/event  飞书事件回调(桥接到 lark-oapi dispatcher)
-- GET /messages   最近消息(查询演示)
+- GET /messages       最近消息(查询演示)
+- GET /messages/groups  按回复链分组的消息(查询演示)
+- GET /messages/topics  按 LLM 主题聚合的消息(主题→回复链组)
 """
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
@@ -21,7 +24,8 @@ from lark_oapi.core.model import RawRequest, RawResponse
 from app.core.config import get_settings
 from app.core.db import check_db_connection, get_session
 from app.dao.message_repo import MessageRepo
-from app.schemas.message import MessageOut, StatsOut
+from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
+from app.services.message_service import MessageService
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,36 @@ def ready() -> JSONResponse:
 @router.get("/messages", response_model=list[MessageOut])
 def messages(limit: int = 50, db: Session = Depends(get_session)) -> list[MessageOut]:
     return MessageRepo(db).list_recent(limit=min(limit, 200))
+
+
+@router.get("/messages/groups", response_model=list[MessageGroupOut])
+def message_groups(
+    chat_id: Optional[str] = None,
+    limit: int = 20,
+    db: Session = Depends(get_session),
+) -> list[MessageGroupOut]:
+    """按回复链分组:A 发消息、B 回复 A 归为同一组。
+
+    - chat_id 可选,过滤单个群
+    - limit 返回最近 N 个组
+    """
+    service = MessageService(db)
+    return service.list_groups(chat_id=chat_id, limit=min(limit, 100))
+
+
+@router.get("/messages/topics", response_model=list[TopicOut])
+def message_topics(
+    chat_id: Optional[str] = None,
+    limit: int = 20,
+) -> list[TopicOut]:
+    """按 LLM 主题聚合:主题 → 回复链组 → 消息。
+
+    - chat_id 可选,过滤单个群
+    - limit 返回最近活跃 N 个主题
+    """
+    from app.services.topic_service import get_topic_service
+
+    return get_topic_service().list_topics(chat_id=chat_id, limit=min(limit, 100))
 
 
 @router.post(get_settings().event_path)

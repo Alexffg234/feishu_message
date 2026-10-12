@@ -12,6 +12,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 from app.services.message_service import MessageService
+from app.services.topic_service import get_topic_service
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,9 @@ def _on_receive(data: P2ImMessageReceiveV1, session_factory) -> None:
     settings = get_settings()
     with session_factory() as session:
         service = MessageService(
-            session, allowed_chat_ids=settings.allowed_chat_id_set
+            session,
+            allowed_chat_ids=settings.allowed_chat_id_set,
+            topic_scheduler=get_topic_service().schedule_group,
         )
         try:
             service.handle_receive_event(data)

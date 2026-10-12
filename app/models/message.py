@@ -1,6 +1,9 @@
 """消息 ORM 模型。
 
 表 messages 存储采集到的群聊消息。chat_id + message_id 加唯一索引防止重复入库。
+
+分组语义:飞书「回复」消息事件带 parent_id(被回复消息)与 root_id(回复链根),
+入库时冗余计算 root_message_id 作为分组键——A 发消息、B 回复 A,两者同组。
 """
 from __future__ import annotations
 
@@ -71,6 +74,14 @@ class Message(Base):
     message_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     create_time: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    # 被回复的消息 id(空=非回复消息);来自事件 message.parent_id
+    parent_message_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    # 分组键:回复链的根消息 id(独立消息=自身);同组消息 root 相同
+    root_message_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", index=True
+    )
+    # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
+    topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
     # 原始结构化数据(图片/文件等附加字段)
     # 用 Optional[dict] 而非 dict | None,兼容 Python 3.9(SQLAlchemy 需运行时解析标注)
     raw: Mapped[Optional[dict]] = mapped_column(JSONText, nullable=True)

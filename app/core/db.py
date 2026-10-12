@@ -1,0 +1,79 @@
+"""数据库核心:SQLAlchemy engine / Session 管理 / 建表。
+
+支持 SQLite(开发)、PostgreSQL 与 MySQL(生产)。生产建议用连接池参数。
+"""
+from __future__ import annotations
+
+import logging
+from collections.abc import Generator
+from pathlib import Path
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _build_engine_url() -> str:
+    url = get_settings().database_url
+    # 确保 sqlite 的父目录存在
+    if url.startswith("sqlite:///"):
+        db_path = url.replace("sqlite:///", "", 1)
+        p = Path(db_path)
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+    # PyMySQL 支持 mysql:// 与 mysql+pymysql:// 两种前缀,统一规范化
+    if url.startswith("mysql://"):
+        url = url.replace("mysql://", "mysql+pymysql://", 1)
+    return url
+
+
+def create_engine_sync() -> Engine:
+    """创建同步 engine。SQLite 关闭 check_same_thread;PG/MySQL 用连接池。"""
+    url = _build_engine_url()
+    is_server_db = url.startswith("postgresql") or url.startswith("mysql")
+    kwargs: dict = {"pool_pre_ping": True}
+    if is_server_db:
+        kwargs.update(
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=1800,
+        )
+    else:
+        kwargs.update(connect_args={"check_same_thread": False})
+    return create_engine(url, **kwargs)
+
+
+engine = create_engine_sync()
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def get_session() -> Generator[Session, None, None]:
+    """FastAPI 依赖:每个请求一个 Session,用完即关。"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db() -> None:
+    """建表(若不存在)。生产可用 Alembic 迁移替代。"""
+    from app.models.message import Base
+
+    Base.metadata.create_all(bind=engine)
+    logger.info("数据库表结构就绪: %s", get_settings().database_url)
+
+
+def check_db_connection() -> bool:
+    """健康检查用:尝试执行一条轻量查询。"""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("数据库连接检查失败")
+        return False

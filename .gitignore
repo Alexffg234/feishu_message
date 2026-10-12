@@ -1,0 +1,28 @@
+# 敏感/本地文件不入库
+config/.env
+config/.env.local
+env/
+.env
+*.env
+storage/*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# 本地数据
+data/
+*.db
+*.sqlite3
+logs/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

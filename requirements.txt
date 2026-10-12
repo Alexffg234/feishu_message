@@ -1,0 +1,12 @@
+# 飞书群聊消息采集 - 运行依赖
+lark-oapi>=1.0.0        # 飞书官方 SDK(事件订阅、签名、加密)
+fastapi>=0.110.0        # Web 框架
+uvicorn[standard]>=0.29.0  # ASGI 服务器
+sqlalchemy>=2.0         # ORM / 数据库抽象
+psycopg[binary]>=3.1     # PostgreSQL 驱动(生产)
+pymysql>=1.1            # MySQL 驱动
+pydantic-settings>=2.0  # 配置管理
+python-dotenv>=1.0      # .env 加载
+
+# 可选:生产推荐 gunicorn(见 Dockerfile)
+# gunicorn>=21.0

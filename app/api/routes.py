@@ -1,0 +1,105 @@
+"""Web 路由层。
+
+包含:
+- GET /           系统统计
+- GET /health     存活探针(Deployment 健康检查)
+- GET /ready     就绪探针(数据库连通)
+- POST /feishu/event  飞书事件回调(桥接到 lark-oapi dispatcher)
+- GET /messages   最近消息(查询演示)
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from lark_oapi.core.const import UTF_8
+from lark_oapi.core.model import RawRequest, RawResponse
+
+from app.core.config import get_settings
+from app.core.db import check_db_connection, get_session
+from app.dao.message_repo import MessageRepo
+from app.schemas.message import MessageOut, StatsOut
+
+logger = logging.getLogger(__name__)
+
+# dispatcher 在应用工厂中注入
+dispatcher = None  # 由 create_app 设置
+
+
+router = APIRouter()
+
+
+def _parse_req(request: Request, body: bytes) -> RawRequest:
+    """FastAPI 请求 -> lark-oapi RawRequest(与官方 Flask 适配器对齐)。"""
+    headers = {k: v for k, v in request.headers.items()}
+    req = RawRequest()
+    req.uri = request.url.path
+    req.body = body
+    req.headers = headers
+    return req
+
+
+def _parse_resp(raw: RawResponse) -> Response:
+    return Response(
+        content=raw.content or b"",
+        status_code=raw.status_code or 200,
+        media_type="application/json",
+    )
+
+
+@router.get("/", response_model=StatsOut)
+def index(db: Session = Depends(get_session)) -> StatsOut:
+    settings = get_settings()
+    count = MessageRepo(db).count()
+    return StatsOut(
+        service="feishu-group-message-capture",
+        status="running",
+        messages_count=count,
+        event_path=settings.event_path,
+        database=_db_brief(settings.database_url),
+        configured=settings.is_ready,
+    )
+
+
+@router.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@router.get("/ready")
+def ready() -> JSONResponse:
+    ok = check_db_connection()
+    return JSONResponse(
+        content={"status": "ready" if ok else "unavailable"},
+        status_code=200 if ok else 503,
+    )
+
+
+@router.get("/messages", response_model=list[MessageOut])
+def messages(limit: int = 50, db: Session = Depends(get_session)) -> list[MessageOut]:
+    return MessageRepo(db).list_recent(limit=min(limit, 200))
+
+
+@router.post(get_settings().event_path)
+async def feishu_event(request: Request) -> Response:
+    """飞书事件回调入口。校验/解密/路由由 lark-oapi dispatcher 完成。"""
+    if dispatcher is None:
+        logger.error("dispatcher 未初始化")
+        return JSONResponse({"msg": "dispatcher not ready"}, status_code=500)
+    body = await request.body()
+    req = _parse_req(request, body)
+    raw = dispatcher.do(req)
+    return _parse_resp(raw)
+
+
+def _db_brief(url: str) -> str:
+    if url.startswith("postgresql"):
+        return "postgresql"
+    if url.startswith("mysql") or url.startswith("mysql+pymysql"):
+        return "mysql"
+    if url.startswith("sqlite"):
+        return "sqlite"
+    return "unknown"

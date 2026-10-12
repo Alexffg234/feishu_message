@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,7 +17,7 @@ class MessageCreate(BaseModel):
     message_type: str = ""
     text: str = ""
     create_time: str = ""
-    raw: dict[str, Any] | None = None
+    raw: Optional[dict[str, Any]] = None
 
 
 class MessageOut(BaseModel):

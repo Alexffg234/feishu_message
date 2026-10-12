@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text
 from sqlalchemy.types import TypeDecorator
@@ -71,7 +72,8 @@ class Message(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     create_time: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     # 原始结构化数据(图片/文件等附加字段)
-    raw: Mapped[dict | None] = mapped_column(JSONText, nullable=True)
+    # 用 Optional[dict] 而非 dict | None,兼容 Python 3.9(SQLAlchemy 需运行时解析标注)
+    raw: Mapped[Optional[dict]] = mapped_column(JSONText, nullable=True)
     # 落库时间(UTC)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow

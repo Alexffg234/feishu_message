@@ -51,6 +51,31 @@ python scripts/query_conversations.py --limit 20       # 最近对话
 python scripts/query_conversations.py --tree <id>      # 某对话的完整回复树
 ```
 
+### 群聊总结可视化页面
+
+内建一个轻量可视化页面,用于查看一次完整对话及其 LLM 总结文案(验证分类/聚合效果):
+
+- `GET /summary`：可视化页面(对话下拉 + 总结卡片 + 回复树)
+- `GET /api/conversations`：最近对话列表
+- `GET /api/summary/{conversation_id}`：某对话详情 + LLM 总结 + 回复树
+
+> 页面需配置 `LLM_API_KEY / LLM_MODEL` 才会出现总结文案;未配置时显示占位并正常展示回复树。
+
+## 服务器热更新
+
+代码合入 `main` 后,在服务器上一条命令完成「拉代码 → 更新依赖 → 建表 → 回填对话关系 → 重启 → 健康检查」:
+
+```bash
+# 在服务器 /opt/feishu_group_message 下执行
+sudo bash deploy/update.sh
+```
+
+要点:
+- `git fetch`(纯网络)与 `git merge --ff-only`(纯本地)分开,网络闪断不影响合并
+- 更新前若工作区有未提交改动会**中止并提示**,绝不覆盖本地修改
+- `init_db.py` / `backfill_conversations.py` 均幂等,可重复执行
+- 部署后访问 `http://<服务器>:8008/summary` 验证总结页
+
 ## 快速开始
 
 ### 1. 创建飞书企业自建应用

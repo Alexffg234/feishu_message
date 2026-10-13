@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_timeout: int = 30
 
+    # ---------- 图片资源(飞书 image_key -> 七牛对象存储) ----------
+    # 收到图片消息时,调飞书下载二进制并上传到七牛,生成可展示 URL 存入消息。
+    # 未配置七牛或飞书无下载权限时,保留 image_key,优雅降级不报错。
+    qiniu_access_key: str = ""
+    qiniu_secret_key: str = ""
+    qiniu_bucket: str = ""
+    qiniu_domain: str = ""  # 七牛 CDN 访问域名,如 https://cdn.example.com(不带尾斜杠)
+    # 是否启用图片下载落盘;默认开启,未配置七牛仍会自动跳过
+    image_download_enabled: bool = True
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)
@@ -78,6 +88,19 @@ class Settings(BaseSettings):
     def llm_enabled(self) -> bool:
         """LLM 主题分类是否可用(api_key 与 model 均配置)。"""
         return bool(self.llm_api_key and self.llm_model)
+
+    @property
+    def image_enabled(self) -> bool:
+        """图片资源落盘是否可用(开关开启且七牛配置齐全+飞书凭据就绪)。"""
+        return bool(
+            self.image_download_enabled
+            and self.qiniu_access_key
+            and self.qiniu_secret_key
+            and self.qiniu_bucket
+            and self.qiniu_domain
+            and self.app_id
+            and self.app_secret
+        )
 
 
 @lru_cache

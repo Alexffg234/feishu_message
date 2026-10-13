@@ -61,6 +61,28 @@ python scripts/query_conversations.py --tree <id>      # 某对话的完整回�
 
 > 页面需配置 `LLM_API_KEY / LLM_MODEL` 才会出现总结文案;未配置时显示占位并正常展示回复树。
 
+## 图片资源(飞书 image_key → 七牛对象存储)
+
+飞书图片消息的 `content` 里只有 `image_key`(如 `{"image_key": "img_v3_..."}`),它是**临时凭证会过期**,本身不是可直接展示的 URL。
+
+本系统在**收到图片消息时**自动完成「下载 → 上传七牛 → 生成可展示 URL」,并把 URL 存入该消息的 `image_url`,总结页/对话树直接用 `<img>` 展示:
+
+```bash
+# config/.env 配置七牛(缺任一则图片消息保留 image_key,优雅降级不报错)
+QINIU_ACCESS_KEY=你的AK
+QINIU_SECRET_KEY=你的SK
+QINIU_BUCKET=你的空间名
+QINIU_DOMAIN=https://cdn.你的域名    # 七牛 CDN 访问域名,不带尾斜杠
+IMAGE_DOWNLOAD_ENABLED=true
+```
+
+关键点:
+- **收到即落盘**:image_key 会过期,不能等展示时再下载,所以入库时同步下载上传。
+- 需飞书应用开通图片下载权限(`im:resource` 或对应资源权限),机器人须在群内。
+- 上传 key 规则:`qiniu/images/{image_key}`,天然去重、可对回原图。
+- 历史消息不回溯;仅新收到的图片消息生效。
+- 列表/总结接口的树节点都带 `image_url`(已落盘)与 `image_key`(原始凭证)字段。
+
 ## 服务器热更新
 
 代码合入 `main` 后,在服务器上一条命令完成「拉代码 → 更新依赖 → 建表 → 回填对话关系 → 重启 → 健康检查」:

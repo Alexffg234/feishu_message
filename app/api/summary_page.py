@@ -40,6 +40,7 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .msg{margin:10px 0;padding:10px 12px;border-radius:8px;background:#fafbfc;border-left:3px solid var(--primary)}
   .msg .who{font-size:12px;color:var(--muted);margin-bottom:2px}
   .msg .body{font-size:14px;word-break:break-word}
+  .msg .msg-img{max-width:320px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;cursor:zoom-in;display:block}
   .indent-0{margin-left:0}
   .indent-1{margin-left:24px;border-left-color:var(--accent)}
   .indent-2{margin-left:48px;border-left-color:#e2a03f}
@@ -146,11 +147,20 @@ function renderTree(nodes, depth){
   for(const n of nodes){
     const m=n.message;
     if(m){
-      const body = renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')';
       const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
+      let bodyHtml;
+      if(m.image_url){
+        // 图片消息:展示七牛图片
+        bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
+      } else if(m.message_type === 'image'){
+        // 图片但未落盘(未配置七牛/下载失败):占位提示
+        bodyHtml = '<span class="empty-note">[图片(未落盘 '+(m.image_key||'')+')]</span>';
+      } else {
+        bodyHtml = esc(renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')');
+      }
       html += '<div class="msg indent-'+Math.min(depth,4)+'">'
             + '<div class="who">'+esc(who)+'</div>'
-            + '<div class="body">'+esc(body)+'</div></div>';
+            + '<div class="body">'+bodyHtml+'</div></div>';
     }
     if(n.children && n.children.length){
       html += renderTree(n.children, depth+1);

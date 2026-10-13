@@ -18,6 +18,7 @@ from app.dao.message_repo import MessageRepo
 from app.dao.conversation_repo import ConversationRepo
 from app.models.message import Message
 from app.schemas.message import MessageCreate
+from app.services.image_service import get_image_service
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,18 @@ class MessageService:
 
         # 解析消息内容
         text, raw = _parse_content(msg.message_type or "", msg.content or "")
+
+        # 图片消息:把 image_key 下载上传七牛,生成可展示 URL 存入 raw.image_url。
+        # 未配置七牛/下载失败则优雅降级(保留 image_key,下次进群消息仍会尝试)。
+        if (msg.message_type or "") == "image" and isinstance(raw, dict):
+            raw.setdefault("image_url", "")
+            image_key = raw.get("image_key") or ""
+            if image_key:
+                try:
+                    raw["image_url"] = get_image_service().resolve_image_url(image_key)
+                except Exception:  # noqa: BLE001 - 图片处理失败不影响入库
+                    logger.warning("处理图片消息异常 image_key=%s", image_key, exc_info=True)
+
 
         # 解析回复关系(仅回复消息带 parent_id / root_id)
         parent_id = getattr(msg, "parent_id", None) or ""

@@ -15,6 +15,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.dao.message_repo import MessageRepo
+from app.dao.conversation_repo import ConversationRepo
 from app.models.message import Message
 from app.schemas.message import MessageCreate
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
@@ -35,6 +36,7 @@ class MessageService:
         self._session = session
         self._allowed = allowed_chat_ids or set()
         self._repo = MessageRepo(session)
+        self._convo = ConversationRepo(session)
         # 入库后回调 (chat_id, root_message_id),用于调度异步主题分类
         self._topic_scheduler = topic_scheduler
 
@@ -78,6 +80,10 @@ class MessageService:
             raw=raw,
         )
 
+        return self.save_message(create)
+
+    def save_message(self, create: MessageCreate) -> bool:
+        """保存一条解析后的消息(含对话关系写入)。返回是否新写入。"""
         return self._save(create)
 
     def list_groups(self, chat_id: str | None = None, limit: int = 50) -> list[dict]:
@@ -149,6 +155,7 @@ class MessageService:
         )
         try:
             self._repo.insert(msg)
+            self._attach_conversation(msg)
             logger.info(
                 "消息入库 [%s] %s @ %s (%s): %s",
                 create.message_id,
@@ -172,6 +179,44 @@ class MessageService:
                 return False
             logger.exception("消息入库失败 %r", create)
             raise
+
+    def _attach_conversation(self, msg: Message) -> None:
+        """把消息挂接到对话表,并维护回复边与对话聚合统计。
+
+        - 确保 conversations 存在(按 chat_id+root_message_id)
+        - 设置 msg.conversation_id
+        - 回复消息则写一条 message_links 边(含 depth)
+        - 重算对话的 message_count / participant_count / 时间
+        """
+        root = msg.root_message_id or msg.message_id
+        conv = self._convo.get(msg.chat_id, root)
+        if conv is None:
+            # 根消息创建对话;非根消息(根未被采集到)暂用当前消息做锚点
+            root_sender = msg.sender_id if (msg.message_id == root) else ""
+            conv = self._convo.create(msg.chat_id, root, root_sender)
+
+        msg.conversation_id = conv.id
+
+        # 回复消息 → 写回复边(子=当前消息, 父=parent_message_id)
+        if msg.parent_message_id:
+            parent_depth = self._convo.get_depth(msg.parent_message_id)
+            depth = parent_depth + 1 if parent_depth >= 0 else 1
+            parent_sender = ""
+            parent = self._repo.get_by_message_id(msg.chat_id, msg.parent_message_id)
+            if parent is not None:
+                parent_sender = parent.sender_id
+            self._convo.add_link(
+                conv.id,
+                parent_message_id=msg.parent_message_id,
+                child_message_id=msg.message_id,
+                parent_sender_id=parent_sender,
+                child_sender_id=msg.sender_id,
+                depth=depth,
+            )
+
+        # 重算聚合统计
+        self._convo.update_group_stats(conv.id)
+        self._session.commit()
 
 
 # ---------------------------------------------------------------- 解析工具

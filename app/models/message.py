@@ -80,6 +80,13 @@ class Message(Base):
     root_message_id: Mapped[str] = mapped_column(
         String(128), nullable=False, default="", index=True
     )
+    # 所属对话表主键(conversations.id);0=尚未挂到对话(回填前)
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=False,
+        default=0,
+        index=True,
+    )
     # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
     # 原始结构化数据(图片/文件等附加字段)

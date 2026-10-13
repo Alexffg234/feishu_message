@@ -62,10 +62,11 @@ def get_session() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     """建表(若不存在)并为存量表补齐回复分组字段。生产可用 Alembic 迁移替代。"""
-    from app.models.message import Base
+    from app.models import Base  # 导入包即注册全部模型(含 conversations/message_links)
 
     Base.metadata.create_all(bind=engine)
     _ensure_message_group_columns()
+    _ensure_conversation_columns()
     logger.info("数据库表结构就绪: %s", get_settings().database_url)
 
 
@@ -99,6 +100,31 @@ def _ensure_message_group_columns() -> None:
                 "WHERE root_message_id = ''"
             )
         )
+
+
+def _ensure_conversation_columns() -> None:
+    """轻量迁移:为存量 messages 表补 conversation_id 列(FK→conversations.id)。
+
+    conversation_id 默认 0 = 尚未挂到对话,由回填脚本(backfill_conversations.py)
+    统一把存量 parent/root 关系落成 conversations + message_links 两条新表。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "messages" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("messages")}
+    if "conversation_id" in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "ALTER TABLE messages ADD COLUMN conversation_id "
+                "BIGINT NOT NULL DEFAULT 0"
+            )
+        )
+        logger.info("messages 表新增列 conversation_id")
 
 
 def check_db_connection() -> bool:

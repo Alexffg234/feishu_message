@@ -8,24 +8,29 @@
 - GET /messages       最近消息(查询演示)
 - GET /messages/groups  按回复链分组的消息(查询演示)
 - GET /messages/topics  按 LLM 主题聚合的消息(主题→回复链组)
+- GET /summary           总结可视化页面(内建 HTML)
+- GET /api/summary/{conversation_id}  某对话的 LLM 总结 + 完整消息树(JSON)
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from lark_oapi.core.const import UTF_8
 from lark_oapi.core.model import RawRequest, RawResponse
 
+from app.api.summary_page import SUMMARY_PAGE_HTML
 from app.core.config import get_settings
 from app.core.db import check_db_connection, get_session
+from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
 from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
 from app.services.message_service import MessageService
+from app.services.summary_service import get_summary_service
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,62 @@ def message_topics(
     from app.services.topic_service import get_topic_service
 
     return get_topic_service().list_topics(chat_id=chat_id, limit=min(limit, 100))
+
+
+@router.get("/summary", response_class=HTMLResponse)
+def summary_page() -> HTMLResponse:
+    """总结可视化页面(内建 HTML,浏览器直接访问)。"""
+    return HTMLResponse(content=SUMMARY_PAGE_HTML)
+
+
+@router.get("/api/conversations")
+def api_conversations(
+    limit: int = 30, db: Session = Depends(get_session)
+) -> list[dict]:
+    """返回最近的对话列表(供页面顶部切换)。"""
+    return [
+        {
+            "id": c.id,
+            "chat_id": c.chat_id,
+            "root_message_id": c.root_message_id,
+            "topic": c.topic,
+            "message_count": c.message_count,
+            "participant_count": c.participant_count,
+        }
+        for c in ConversationRepo(db).list_recent(limit=min(limit, 100))
+    ]
+
+
+@router.get("/api/summary/{conversation_id}")
+def api_summary(
+    conversation_id: int, db: Session = Depends(get_session)
+) -> dict:
+    """某对话的 LLM 总结 + 完整消息树。
+
+    返回 {conversation_id, enabled, topic, summary, tree, messages}。
+    - enabled=false 表示服务器未配置 LLM,summary 为空
+    - 未找到对话返回 404
+    """
+    repo = ConversationRepo(db)
+    from app.models.conversation import Conversation
+
+    conv = db.get(Conversation, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    tree = repo.list_tree(conversation_id)
+    summary = get_summary_service().summarize(conversation_id)
+
+    return {
+        "conversation_id": conversation_id,
+        "chat_id": conv.chat_id,
+        "root_message_id": conv.root_message_id,
+        "topic": conv.topic or summary.get("topic", ""),
+        "enabled": summary.get("enabled", False),
+        "summary": summary.get("summary", ""),
+        "tree": tree["roots"],
+        "message_count": tree["message_count"],
+    }
 
 
 @router.post(get_settings().event_path)

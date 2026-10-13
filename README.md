@@ -20,16 +20,35 @@ feishu_message/
 ├── config/
 │   └── .env.example        # 配置模板(复制为 .env)
 ├── scripts/
-│   ├── init_db.py          # 初始化数据库
-│   └── query_messages.py   # 查看/导出/分组查询已采集消息
+│   ├── init_db.py                  # 初始化数据库(含对话表)
+│   ├── query_messages.py           # 查看/导出/分组查询已采集消息
+│   ├── backfill_conversations.py   # 存量消息回填成对话关系(幂等)
+│   └── query_conversations.py      # 查询对话/回复树
 └── app/
     ├── main.py             # FastAPI 应用工厂
     ├── api/routes.py       # HTTP 路由(事件回调 + 查询接口)
     ├── core/               # 配置 / 数据库 / 日志
-    ├── models/message.py   # 消息 ORM 模型
+    ├── models/             # ORM 模型(message / conversation / message_link)
     ├── schemas/message.py  # Pydantic schema
-    ├── dao/message_repo.py # 数据访问层
-    └── services/           # 事件处理 / 业务逻辑(含分组)
+    ├── dao/                # 数据访问层(message / conversation_repo)
+    └── services/           # 事件处理 / 业务逻辑(含分组、主题)
+```
+
+## 对话关系存储
+
+消息除详情落 `messages` 表外,回复链作为**独立实体**存储,支持任意深度的回复树:
+
+- `conversations`：一条回复链 = 一个对话(含根消息、参与人、时间范围、主题、消息数)
+- `message_links`：每条"回复"边 child→parent(含 depth),完整保留多层级树(A→B→C→D)
+
+新建库自动建表;存量库执行 `init_db.py` 补齐 `messages.conversation_id` 列,再执行
+`backfill_conversations.py` 把已有回复关系回填成对话。
+
+```bash
+python scripts/init_db.py                 # 建表/加列
+python scripts/backfill_conversations.py  # 回填存量对话关系
+python scripts/query_conversations.py --limit 20       # 最近对话
+python scripts/query_conversations.py --tree <id>      # 某对话的完整回复树
 ```
 
 ## 快速开始

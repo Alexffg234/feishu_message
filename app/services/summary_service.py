@@ -40,11 +40,24 @@ def _field(m, name: str, default: str = "") -> str:
     return getattr(m, name, default) or default
 
 
+def _mentions_text(text: str, mentions) -> str:
+    """把文本里的 @占位符(如 @_user_1)替换成 @真实姓名。
+
+    前提:list_tree 的节点 dict 里带了 mentions({ "@_user_1": "王国浩" })。无映射则原样返回。
+    """
+    if not text or not mentions or not isinstance(mentions, dict):
+        return text
+    for key, name in mentions.items():
+        if name:
+            text = text.replace(key, f"@{name}")
+    return text
+
+
 def _fmt_rows(rows: list) -> str:
     """把消息格式化为 LLM 可读的对话文本。"""
     lines = []
     for m in rows:
-        text = (_field(m, "text").strip())
+        text = _mentions_text(_field(m, "text"), _field(m, "mentions")).strip()
         text = text or f"({_field(m, 'message_type') or '非文本'})"
         sender = _field(m, "sender_id") or "?"
         lines.append(f"{sender}: {text}")

@@ -66,6 +66,16 @@ class MessageService:
         parent_id = getattr(msg, "parent_id", None) or ""
         root_id = getattr(msg, "root_id", None) or ""
 
+        # 解析 @ 提及:飞书回调 text 里是占位符(如 @_user_1),真实名字在 msg.mentions[i].name。
+        # 记录 key->真实名 映射,供展示/LLM 时把占位符替换成 "@真实姓名"。
+        mentions = _extract_mentions(getattr(msg, "mentions", None) or [])
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {"raw_content": raw}
+        if mentions:
+            raw["mentions"] = mentions
+
         create = MessageCreate(
             message_id=msg.message_id or "",
             chat_id=chat_id,
@@ -234,6 +244,33 @@ def _sender_info(sender: Any) -> tuple[str, str]:
         )
     stype = getattr(sender, "sender_type", None) or ""
     return sid, stype
+
+
+def _extract_mentions(mention_events: list) -> dict[str, str]:
+    """从飞书消息事件的 mentions 数组提取 {占位符key: 真实姓名} 映射。
+
+    占位符如 "@_user_1";name 即真实姓名(如 "王国浩")。@所有人等非用户场景 name 为空。
+    """
+    mapping: dict[str, str] = {}
+    for m in mention_events or []:
+        key = getattr(m, "key", None)
+        name = getattr(m, "name", None) or ""
+        if key:
+            mapping[key] = name
+    return mapping
+
+
+def render_mentions_text(text: str, mentions: dict | None) -> str:
+    """把文本里的 @占位符(如 @_user_1)替换成 @真实姓名。
+
+    mentions 形如 {"@_user_1": "王国浩"}。未配置映射时原样返回。
+    """
+    if not text or not mentions:
+        return text
+    for key, name in mentions.items():
+        if name:
+            text = text.replace(key, f"@{name}")
+    return text
 
 
 def _parse_content(msg_type: str, content_json: str) -> tuple[str, dict[str, Any] | None]:

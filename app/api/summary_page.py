@@ -80,6 +80,18 @@ function shortId(id){return id ? String(id).slice(0,18)+'…' : '';}
 
 function esc(t){const d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML;}
 
+// 把文本里的 @占位符(如 @_user_1)替换成 @真实姓名;mentions 形如 {"@_user_1":"王国浩"}
+function renderAt(text, mentions){
+  text = text || '';
+  if(mentions && typeof mentions === 'object'){
+    for(const key in mentions){
+      const name = mentions[key];
+      if(name){ text = text.split(key).join('@'+name); }
+    }
+  }
+  return text;
+}
+
 async function loadConversations(){
   const r = await fetch('/api/conversations?limit=50');
   convs = await r.json();
@@ -134,7 +146,7 @@ function renderTree(nodes, depth){
   for(const n of nodes){
     const m=n.message;
     if(m){
-      const body = m.text? m.text : '(' + (m.message_type||'非文本') + ')';
+      const body = renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')';
       html += '<div class="msg indent-'+Math.min(depth,4)+'">'
             + '<div class="who">'+esc(shortId(m.sender_id))+'</div>'
             + '<div class="body">'+esc(body)+'</div></div>';

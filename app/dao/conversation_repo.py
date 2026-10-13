@@ -137,6 +137,8 @@ class ConversationRepo:
     @staticmethod
     def _tree_dict(m: Message) -> dict:
         """把 Message ORM 对象转成可 JSON 序列化的字典。"""
+        raw = m.raw or {}
+        mentions = raw.get("mentions") if isinstance(raw, dict) else None
         return {
             "message_id": m.message_id,
             "sender_id": m.sender_id,
@@ -146,6 +148,7 @@ class ConversationRepo:
             "create_time": m.create_time,
             "parent_message_id": m.parent_message_id,
             "topic": m.topic,
+            "mentions": mentions or {},
         }
 
     def list_tree(self, conversation_id: int) -> dict:

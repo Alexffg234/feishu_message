@@ -16,7 +16,7 @@ import logging
 from functools import lru_cache
 
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import GetImageRequest
+from lark_oapi.api.im.v1 import GetMessageResourceRequest
 
 from app.core.config import get_settings
 
@@ -33,8 +33,13 @@ class ImageService:
         self._client = client
 
     # ------------------------------------------------------------ 对外
-    def resolve_image_url(self, image_key: str) -> str:
-        """把飞书 image_key 转成可展示的七牛 URL。
+    def resolve_image_url(self, image_key: str, message_id: str = "") -> str:
+        """把飞书图片资源转成可展示的七牛 URL。
+
+        image_key 是图片资源在消息里的 file_key。注意:下载"用户发送的消息内图片"
+        必须走[获取消息中的资源文件]接口,并要求带 message_id 路径参数——
+        单独的 /im/v1/images/:image_key 只能下载机器人自己上传的图片,否则
+        会返回 234001 Invalid request param。
 
         返回七牛可访问 URL;下载/上传失败或未配置则返回空串(调用方保留 image_key)。
         """
@@ -51,10 +56,10 @@ class ImageService:
             logger.warning("飞书客户端不可用,跳过图片下载 image_key=%s", image_key)
             return ""
 
-        # 下载飞书图片二进制
-        data = self._download_image(client, image_key)
+        # 下载飞书图片二进制(需 message_id + file_key + type=image)
+        data = self._download_image(client, image_key, message_id)
         if not data:
-            logger.warning("下载飞书图片失败 image_key=%s", image_key)
+            logger.warning("下载飞书图片失败 image_key=%s message_id=%s", image_key, message_id)
             return ""
 
         # 上传到七牛,key 用 image_key(天然唯一,且能对回去原图)
@@ -69,19 +74,29 @@ class ImageService:
         return url
 
     # ------------------------------------------------------------ 飞书下载
-    def _download_image(self, client: lark.Client, image_key: str) -> bytes | None:
-        """调飞书 im/v1/images/:image_key 下载图片二进制。失败返回 None。"""
+    def _download_image(
+        self, client: lark.Client, image_key: str, message_id: str
+    ) -> bytes | None:
+        """调飞书[获取消息中的资源文件]下载图片二进制。失败返回 None。
+
+        接口: GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image
+        file_key 即 image_key。必须带 message_id,缺 message_id 或走 images 快捷接口
+        都会报 234001 Invalid request param。
+        """
         try:
             req = (
-                GetImageRequest.builder()
-                .image_key(image_key)
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(image_key)
+                .type("image")
                 .build()
             )
-            resp = client.im.v1.image.get(req)
+            resp = client.im.v1.message_resource.get(req)
             if resp is None or not resp.success():
                 logger.warning(
-                    "获取飞书图片失败 image_key=%s: code=%s msg=%s",
+                    "获取飞书图片资源失败 image_key=%s message_id=%s: code=%s msg=%s",
                     image_key,
+                    message_id,
                     getattr(resp, "code", "?"),
                     getattr(resp, "msg", "?"),
                 )

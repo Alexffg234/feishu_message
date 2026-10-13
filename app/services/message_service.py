@@ -70,7 +70,9 @@ class MessageService:
             image_key = raw.get("image_key") or ""
             if image_key:
                 try:
-                    raw["image_url"] = get_image_service().resolve_image_url(image_key)
+                    raw["image_url"] = get_image_service().resolve_image_url(
+                        image_key, msg.message_id or ""
+                    )
                 except Exception:  # noqa: BLE001 - 图片处理失败不影响入库
                     logger.warning("处理图片消息异常 image_key=%s", image_key, exc_info=True)
 

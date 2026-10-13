@@ -78,9 +78,11 @@ IMAGE_DOWNLOAD_ENABLED=true
 
 关键点:
 - **收到即落盘**:image_key 会过期,不能等展示时再下载,所以入库时同步下载上传。
-- 需飞书应用开通图片下载权限(`im:resource` 或对应资源权限),机器人须在群内。
+- **下载接口**:用[获取消息中的资源文件] `GET /im/v1/messages/{message_id}/resources/{file_key}?type=image`。
+  ⚠️ 不要用 `/im/v1/images/{image_key}`(那是给机器人自己上传的图用的,下载用户发的图会返回 **234001 Invalid request param**)。
+- **权限**:需要飞书应用开通 `im:resource`(读取消息中的文件资源)权限,机器人须在群内。
 - 上传 key 规则:`qiniu/images/{image_key}`,天然去重、可对回原图。
-- 历史消息不回溯;仅新收到的图片消息生效。
+- 历史消息可补:服务器上跑 `python scripts/backfill_images.py [--limit 500]` 回填已入库但缺 image_url 的图片(幂等可重复)。
 - 列表/总结接口的树节点都带 `image_url`(已落盘)与 `image_key`(原始凭证)字段。
 
 ## 服务器热更新

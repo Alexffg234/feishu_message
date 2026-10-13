@@ -144,12 +144,12 @@ class MessageService:
     def _resolve_root(self, create: MessageCreate) -> str:
         """确定消息所属分组的根消息 id。
 
-        - 独立消息(无 parent):根=自身
+        - 独立消息:先尝试轮次合并(同一人连发多条归入同一消息块),否则根=自身
         - 回复消息:优先取父消息已落库的 root(保证多级回复归到同一根);
           父消息未采集到(如机器人入群前)时,回退用事件 root_id,再回退用 parent_id。
         """
         if not create.parent_message_id:
-            return create.message_id
+            return self._try_merge_turn(create) or create.message_id
 
         parent = self._repo.get_by_message_id(
             create.chat_id, create.parent_message_id
@@ -158,6 +158,48 @@ class MessageService:
             return parent.root_message_id or parent.message_id
         # 父消息不在库中:用事件携带的 root_id,否则以被回复消息为分组锚点
         return create.root_message_id or create.parent_message_id
+
+    def _try_merge_turn(self, create: MessageCreate) -> str:
+        """轮次合并:同一人短间隔连发的独立消息并入同一消息块。
+
+        从本群最新消息往回找(时间窗 = turn_merge_seconds):
+        - 第一条同发送者的历史消息作为块锚点
+        - 锚点与新消息之间若有属于其他组的消息(无关者插话),则不合并
+        返回应并入的 root_message_id;不合并返回 ""。
+        """
+        from app.core.config import get_settings
+
+        window_ms = get_settings().turn_merge_seconds * 1000
+        if window_ms <= 0 or not create.sender_id or not create.create_time:
+            return ""
+        try:
+            now_ms = int(create.create_time)
+        except ValueError:
+            return ""
+
+        recent = self._repo.list_by_chat(create.chat_id, limit=50)
+        anchor: Message | None = None
+        between: list[Message] = []
+        for m in recent:  # 时间倒序
+            if not m.create_time:
+                continue
+            try:
+                gap = now_ms - int(m.create_time)
+            except ValueError:
+                continue
+            if gap > window_ms:
+                break
+            if m.sender_id == create.sender_id:
+                anchor = m
+                break
+            between.append(m)
+        if anchor is None:
+            return ""
+        root = anchor.root_message_id or anchor.message_id
+        for m in between:
+            if (m.root_message_id or m.message_id) != root:
+                return ""
+        return root
 
     def _save(self, create: MessageCreate) -> bool:
         """落库并防重。返回 True 表示新写入,False 表示重复跳过。"""

@@ -5,8 +5,9 @@
 不触碰远程 MySQL,使用独立内存库。
 """
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"D:\Code\Vib Coding\feishu_group_message")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -113,10 +114,11 @@ def test_tree_query_repo():
     assert tree["message_count"] == 3
     roots = tree["roots"]
     assert len(roots) == 1
-    assert roots[0]["message"].message_id == "r"
+    # list_tree 返回可 JSON 序列化的 dict(见 ConversationRepo._tree_dict)
+    assert roots[0]["message"]["message_id"] == "r"
     assert len(roots[0]["children"]) == 1
-    assert roots[0]["children"][0]["message"].message_id == "c1"
-    assert roots[0]["children"][0]["children"][0]["message"].message_id == "c2"
+    assert roots[0]["children"][0]["message"]["message_id"] == "c1"
+    assert roots[0]["children"][0]["children"][0]["message"]["message_id"] == "c2"
     print("tree repo OK")
 
 

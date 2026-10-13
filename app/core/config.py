@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # 是否启用图片下载落盘;默认开启,未配置七牛仍会自动跳过
     image_download_enabled: bool = True
 
+    # ---------- 轮次合并(同一人连发多条) ----------
+    # 同一发送者的独立消息,间隔小于该秒数且中间无无关打断时,合并进同一消息块。
+    # 0 = 禁用合并(每条独立消息自成一组)。
+    turn_merge_seconds: int = 30
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)

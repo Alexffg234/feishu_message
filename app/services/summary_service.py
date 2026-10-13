@@ -32,12 +32,22 @@ _TOPIC_PROMPT = (
 )
 
 
+def _field(m, name: str, default: str = "") -> str:
+    """取消息的字段值,兼容 ORM 对象(.attr)与 dict(['k']/'k')两种形态。"""
+    if isinstance(m, dict):
+        v = m.get(name)
+        return v if v is not None else default
+    return getattr(m, name, default) or default
+
+
 def _fmt_rows(rows: list) -> str:
     """把消息格式化为 LLM 可读的对话文本。"""
     lines = []
     for m in rows:
-        text = (m.text or "").strip() or f"({m.message_type or '非文本'})"
-        lines.append(f"{m.sender_id or '?'}: {text}")
+        text = (_field(m, "text").strip())
+        text = text or f"({_field(m, 'message_type') or '非文本'})"
+        sender = _field(m, "sender_id") or "?"
+        lines.append(f"{sender}: {text}")
     return "\n".join(lines)
 
 

@@ -20,6 +20,8 @@ data/
 *.sqlite3
 logs/
 *.log
+# 部署脚本生成的依赖哈希缓存(deploy/update.sh 写入)
+.deps.sha256
 
 # IDE / 系统
 .idea/

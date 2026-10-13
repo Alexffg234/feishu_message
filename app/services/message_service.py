@@ -63,18 +63,14 @@ class MessageService:
         # 解析消息内容
         text, raw = _parse_content(msg.message_type or "", msg.content or "")
 
-        # 图片消息:把 image_key 下载上传七牛,生成可展示 URL 存入 raw.image_url。
-        # 未配置七牛/下载失败则优雅降级(保留 image_key,下次进群消息仍会尝试)。
-        if (msg.message_type or "") == "image" and isinstance(raw, dict):
-            raw.setdefault("image_url", "")
-            image_key = raw.get("image_key") or ""
-            if image_key:
-                try:
-                    raw["image_url"] = get_image_service().resolve_image_url(
-                        image_key, msg.message_id or ""
-                    )
-                except Exception:  # noqa: BLE001 - 图片处理失败不影响入库
-                    logger.warning("处理图片消息异常 image_key=%s", image_key, exc_info=True)
+        # 图片/视频消息:把资源 file_key 下载上传七牛,生成可展示 URL 存入 raw。
+        # 未配置七牛/下载失败则优雅降级(保留 file_key,不阻塞入库)。
+        msg_type = msg.message_type or ""
+        if isinstance(raw, dict):
+            if msg_type == "image":
+                _resolve_image(raw, msg.message_id or "")
+            elif msg_type == "media":
+                _resolve_video(raw, msg.message_id or "")
 
 
         # 解析回复关系(仅回复消息带 parent_id / root_id)
@@ -362,3 +358,42 @@ def _extract_post_text(content: Any) -> str:
                     if isinstance(run, dict) and run.get("text"):
                         parts.append(run["text"])
     return " ".join(parts).strip()
+
+
+# ---------------------------------------------------------------- 资源落盘
+def _resolve_image(raw: dict, message_id: str) -> None:
+    """图片消息:下载 image_key(type=image) 上传七牛,写入 raw.image_url。"""
+    raw.setdefault("image_url", "")
+    image_key = raw.get("image_key") or ""
+    if not image_key:
+        return
+    try:
+        raw["image_url"] = get_image_service().resolve_image_url(image_key, message_id)
+    except Exception:  # noqa: BLE001 - 图片处理失败不影响入库
+        logger.warning("处理图片消息异常 image_key=%s", image_key, exc_info=True)
+
+
+def _resolve_video(raw: dict, message_id: str) -> None:
+    """视频消息(content 结构 {file_key,file_name,image_key,duration})。
+
+    - file_url: 视频本体(file_key + type=file)
+    - image_url: 视频封面(image_key + type=image)
+    未配置/失败均优雅降级(保留 file_key),不阻塞入库。
+    """
+    svc = get_image_service()
+    # 视频本体
+    raw.setdefault("file_url", "")
+    file_key = raw.get("file_key") or ""
+    if file_key:
+        try:
+            raw["file_url"] = svc.resolve_file_url(file_key, message_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("处理视频消息异常 file_key=%s", file_key, exc_info=True)
+    # 视频封面(本质是图片)
+    raw.setdefault("image_url", "")
+    cover_key = raw.get("image_key") or ""
+    if cover_key:
+        try:
+            raw["image_url"] = svc.resolve_image_url(cover_key, message_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("处理视频封面异常 image_key=%s", cover_key, exc_info=True)

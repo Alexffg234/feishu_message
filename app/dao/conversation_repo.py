@@ -141,6 +141,10 @@ class ConversationRepo:
         mentions = raw.get("mentions") if isinstance(raw, dict) else None
         image_key = raw.get("image_key") if isinstance(raw, dict) else ""
         image_url = raw.get("image_url") if isinstance(raw, dict) else ""
+        file_key = raw.get("file_key") if isinstance(raw, dict) else ""
+        file_url = raw.get("file_url") if isinstance(raw, dict) else ""
+        file_name = raw.get("file_name") if isinstance(raw, dict) else ""
+        duration = raw.get("duration") if isinstance(raw, dict) else ""
         return {
             "message_id": m.message_id,
             "sender_id": m.sender_id,
@@ -151,9 +155,14 @@ class ConversationRepo:
             "parent_message_id": m.parent_message_id,
             "topic": m.topic,
             "mentions": mentions or {},
-            # 图片消息:image_key 为飞书临时凭证(会过期),image_url 为七牛可展示 URL
+            # 图片消息:image_key 飞书临时凭证,image_url 七牛可展示 URL
             "image_key": image_key or "",
             "image_url": image_url or "",
+            # 视频消息:file_key 飞书临时凭证,file_url 七牛视频 URL,image_url 为封面
+            "file_key": file_key or "",
+            "file_url": file_url or "",
+            "file_name": file_name or "",
+            "duration": duration or "",
             # 发送者真实姓名(由上层用 UserNameService 填充;未填充时为空)
             "sender_name": "",
         }

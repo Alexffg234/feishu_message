@@ -61,14 +61,19 @@ python scripts/query_conversations.py --tree <id>      # 某对话的完整回�
 
 > 页面需配置 `LLM_API_KEY / LLM_MODEL` 才会出现总结文案;未配置时显示占位并正常展示回复树。
 
-## 图片资源(飞书 image_key → 七牛对象存储)
+## 消息资源(图片/视频/文件 → 七牛对象存储)
 
-飞书图片消息的 `content` 里只有 `image_key`(如 `{"image_key": "img_v3_..."}`),它是**临时凭证会过期**,本身不是可直接展示的 URL。
+飞书资源类消息的 `content` 里只有资源 key(图片 `image_key`、视频 `file_key`,如 `{"image_key":"img_v3_...","file_key":"file_v3_...","file_name":"x.mp4","duration":71033}`),这些 key 是**临时凭证会过期**,本身不是可直接展示的 URL。
 
-本系统在**收到图片消息时**自动完成「下载 → 上传七牛 → 生成可展示 URL」,并把 URL 存入该消息的 `image_url`,总结页/对话树直接用 `<img>` 展示:
+本系统在**收到资源类消息时**自动完成「下载 → 上传七牛 → 生成可展示 URL」并落库:
+
+| 消息类型 | 下载内容 | 落库字段 | 展示 |
+|---|---|---|---|
+| image | 图片(image_key, `type=image`) | `image_url` | `<img>` |
+| media(视频) | 视频本体(file_key, `type=file`) + 封面(image_key) | `file_url` + `image_url`(封面) | `<video>`(带封面) |
 
 ```bash
-# config/.env 配置七牛(缺任一则图片消息保留 image_key,优雅降级不报错)
+# config/.env 配置七牛(缺任一则资源消息保留 key,优雅降级不报错)
 QINIU_ACCESS_KEY=你的AK
 QINIU_SECRET_KEY=你的SK
 QINIU_BUCKET=你的空间名
@@ -77,13 +82,16 @@ IMAGE_DOWNLOAD_ENABLED=true
 ```
 
 关键点:
-- **收到即落盘**:image_key 会过期,不能等展示时再下载,所以入库时同步下载上传。
-- **下载接口**:用[获取消息中的资源文件] `GET /im/v1/messages/{message_id}/resources/{file_key}?type=image`。
-  ⚠️ 不要用 `/im/v1/images/{image_key}`(那是给机器人自己上传的图用的,下载用户发的图会返回 **234001 Invalid request param**)。
+- **收到即落盘**:资源 key 会过期,不能等展示时再下载,所以入库时同步下载上传。
+- **下载接口**:用[获取消息中的资源文件] `GET /im/v1/messages/{message_id}/resources/{file_key}?type=image|file`。
+  - 图片/封面用 `type=image`;视频/音频/文件用 `type=file`。
+  - ⚠️ 不要用 `/im/v1/images/{image_key}`(那是给机器人自己上传的图用,下载用户发的资源会返回 **234001 Invalid request param**)。
 - **权限**:需要飞书应用开通 `im:resource`(读取消息中的文件资源)权限,机器人须在群内。
-- 上传 key 规则:`qiniu/images/{image_key}`,天然去重、可对回原图。
-- 历史消息可补:服务器上跑 `python scripts/backfill_images.py [--limit 500]` 回填已入库但缺 image_url 的图片(幂等可重复)。
-- 列表/总结接口的树节点都带 `image_url`(已落盘)与 `image_key`(原始凭证)字段。
+- 上传 key 规则:`qiniu/images/{key}`(图片)、`qiniu/files/{key}`(视频),天然去重、可对回原资源。
+- 历史消息可补:服务器上跑 `python ./.venv/bin/python scripts/backfill_images.py [--limit 500]` 回填(幂等可重复)。
+- 列表/总结接口的树节点都带 `image_url`/`file_url`(已落盘)与 `image_key`/`file_key`(原始凭证)字段。
+
+> ⚠️ 服务器上运行 python 脚本务必用项目 venv:`./.venv/bin/python scripts/xxx.py`(系统 `python` 是 conda base,没装项目依赖会报 `ModuleNotFoundError: sqlalchemy`)。
 
 ## 服务器热更新
 

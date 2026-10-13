@@ -41,6 +41,8 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .msg .who{font-size:12px;color:var(--muted);margin-bottom:2px}
   .msg .body{font-size:14px;word-break:break-word}
   .msg .msg-img{max-width:320px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;cursor:zoom-in;display:block}
+  .msg .msg-video{max-width:360px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;display:block;background:#000}
+  .msg .media-name{font-size:12px;color:var(--muted);margin-top:4px;word-break:break-all}
   .indent-0{margin-left:0}
   .indent-1{margin-left:24px;border-left-color:var(--accent)}
   .indent-2{margin-left:48px;border-left-color:#e2a03f}
@@ -149,7 +151,19 @@ function renderTree(nodes, depth){
     if(m){
       const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
       let bodyHtml;
-      if(m.image_url){
+      if(m.message_type === 'media'){
+        // 视频消息
+        if(m.file_url){
+          bodyHtml = '<video class="msg-video" src="'+esc(m.file_url)+'" controls preload="metadata"'
+                   + (m.image_url ? ' poster="'+esc(m.image_url)+'"' : '') + '></video>'
+                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+        } else if(m.image_url){
+          bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[视频封面]" onclick="window.open(this.src)">'
+                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+        } else {
+          bodyHtml = '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
+        }
+      } else if(m.image_url){
         // 图片消息:展示七牛图片
         bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
       } else if(m.message_type === 'image'){

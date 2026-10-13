@@ -1,19 +1,24 @@
-"""飞书图片资源 -> 七牛对象存储服务。
+"""飞书消息资源(file_key) -> 七牛对象存储服务。
 
-背景:飞书图片消息的 content 里只有 `{"image_key": "img_v3_..."}`,image_key 是
-临时凭证,会过期。它本身不是可直接展示的 URL。
+背景:飞书图片/视频消息的内容里只有资源 key(image_key / file_key),这些 key 是
+临时凭证,会过期,本身不是可直接展示的 URL。
 
-这里在收到图片消息时(入库前)把 image_key 调飞书 `im/v1/images/:image_key`
-下载成二进制,再上传到七牛对象存储,生成长期稳定的可访问 URL 返回给调用方。
+这里在收到资源类消息时(入库前)用飞书「获取消息中的资源文件」接口把
+file_key 下载成二进制,再上传到七牛对象存储,生成长期稳定的可访问 URL。
+
+接口说明(飞书 im/v1/messages/:message_id/resources/:file_key,type 必填):
+- type=image   图片、富文本里的图片 → file_key 用 image_key
+- type=file    文件、音频、视频(表情除外) → file_key 用 file_key
+注意:不能用 /im/v1/images/:image_key(那是给机器人自己上传的图用,下用户资源报 234001)。
 
 设计原则(与项目其他服务一致):
 - 未配置七牛 / 飞书无下载权限 / 网络异常 → 优雅降级返回空字符串,绝不抛出中断入库。
-- 同一个 image_key 只处理一次(避免重复下载/上传)。
 """
 from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from typing import Literal
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import GetMessageResourceRequest
@@ -22,80 +27,97 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# 飞书图片下载 token 类型为应用凭证(TENANT)
-_IMG_PROVIDER = "qiniu"
+# 飞书资源下载 token 类型为应用凭证(TENANT)
+_PROVIDER = "qiniu"
+# 飞书接口允许的资源类型
+ResType = Literal["image", "file"]
 
 
 class ImageService:
-    """封装飞书图片下载 + 七牛上传,产出可展示 URL。"""
+    """封装飞书消息资源(file_key)下载 + 七牛上传,产出可展示 URL。"""
 
     def __init__(self, client: lark.Client | None = None):
         self._client = client
 
     # ------------------------------------------------------------ 对外
     def resolve_image_url(self, image_key: str, message_id: str = "") -> str:
-        """把飞书图片资源转成可展示的七牛 URL。
+        """把飞书图片资源(image_key)转成可展示的七牛 URL。"""
+        return self._resolve_resource(image_key, message_id, "image", "images")
 
-        image_key 是图片资源在消息里的 file_key。注意:下载"用户发送的消息内图片"
-        必须走[获取消息中的资源文件]接口,并要求带 message_id 路径参数——
-        单独的 /im/v1/images/:image_key 只能下载机器人自己上传的图片,否则
-        会返回 234001 Invalid request param。
+    def resolve_file_url(self, file_key: str, message_id: str = "") -> str:
+        """把飞书视频/文件资源(file_key)转成可展示的七牛 URL(type=file)。"""
+        return self._resolve_resource(file_key, message_id, "file", "files")
 
-        返回七牛可访问 URL;下载/上传失败或未配置则返回空串(调用方保留 image_key)。
+    def _resolve_resource(
+        self,
+        file_key: str,
+        message_id: str,
+        res_type: ResType,
+        save_dir: str,
+    ) -> str:
+        """把飞书消息资源(file_key)下载并上传七牛,返回可访问 URL。
+
+        res_type: 'image' 或 'file'(飞书接口只区分这两种)。
+        save_dir: 七牛上的目录名,如 images / files。
+        返回七牛可访问 URL;下载/上传失败或未配置则返回空串(调用方保留 file_key)。
         """
-        if not image_key:
+        if not file_key:
             return ""
 
         settings = get_settings()
         if not settings.image_enabled:
-            logger.debug("图片资源未启用(缺七牛/飞书配置),跳过 image_key=%s", image_key)
+            logger.debug("图片资源未启用(缺七牛/飞书配置),跳过 %s=%s", res_type, file_key)
             return ""
 
         client = self._get_client()
         if client is None:
-            logger.warning("飞书客户端不可用,跳过图片下载 image_key=%s", image_key)
+            logger.warning("飞书客户端不可用,跳过 %s 下载 %s", res_type, file_key)
             return ""
 
-        # 下载飞书图片二进制(需 message_id + file_key + type=image)
-        data = self._download_image(client, image_key, message_id)
+        # 下载飞书资源二进制(需 message_id + file_key + type)
+        data = self._download_resource(client, file_key, message_id, res_type)
         if not data:
-            logger.warning("下载飞书图片失败 image_key=%s message_id=%s", image_key, message_id)
+            logger.warning("下载飞书资源失败 %s=%s message_id=%s", res_type, file_key, message_id)
             return ""
 
-        # 上传到七牛,key 用 image_key(天然唯一,且能对回去原图)
-        key = f"{_IMG_PROVIDER}/images/{image_key}"
+        # 上传到七牛,key 用 file_key(天然唯一,且能对回去原资源)
+        key = f"{_PROVIDER}/{save_dir}/{file_key}"
         ok, _err = self._upload_to_qiniu(key, data)
         if not ok:
-            logger.warning("上传图片到七牛失败 image_key=%s", image_key)
+            logger.warning("上传资源到七牛失败 %s=%s", res_type, file_key)
             return ""
 
         url = f"{settings.qiniu_domain.rstrip('/')}/{key}"
-        logger.info("图片已落盘: %s -> %s", image_key, url)
+        logger.info("资源已落盘(%s): %s -> %s", res_type, file_key, url)
         return url
 
     # ------------------------------------------------------------ 飞书下载
-    def _download_image(
-        self, client: lark.Client, image_key: str, message_id: str
+    def _download_resource(
+        self,
+        client: lark.Client,
+        file_key: str,
+        message_id: str,
+        res_type: ResType,
     ) -> bytes | None:
-        """调飞书[获取消息中的资源文件]下载图片二进制。失败返回 None。
+        """调飞书[获取消息中的资源文件]下载资源二进制。失败返回 None。
 
-        接口: GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image
-        file_key 即 image_key。必须带 message_id,缺 message_id 或走 images 快捷接口
-        都会报 234001 Invalid request param。
+        接口: GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={res_type}
+        必须带 message_id,缺 message_id 或走 images 快捷接口都会报 234001。
         """
         try:
             req = (
                 GetMessageResourceRequest.builder()
                 .message_id(message_id)
-                .file_key(image_key)
-                .type("image")
+                .file_key(file_key)
+                .type(res_type)
                 .build()
             )
             resp = client.im.v1.message_resource.get(req)
             if resp is None or not resp.success():
                 logger.warning(
-                    "获取飞书图片资源失败 image_key=%s message_id=%s: code=%s msg=%s",
-                    image_key,
+                    "获取飞书资源失败 %s=%s message_id=%s: code=%s msg=%s",
+                    res_type,
+                    file_key,
                     message_id,
                     getattr(resp, "code", "?"),
                     getattr(resp, "msg", "?"),
@@ -103,15 +125,15 @@ class ImageService:
                 return None
             file_io = getattr(resp, "file", None)
             if file_io is None:
-                logger.warning("飞书图片响应无文件内容 image_key=%s", image_key)
+                logger.warning("飞书资源响应无内容 %s=%s", res_type, file_key)
                 return None
             try:
                 return file_io.read()
             except Exception as e:  # noqa: BLE001
-                logger.warning("读取飞书图片字节失败 image_key=%s: %s", image_key, e)
+                logger.warning("读取飞书资源字节失败 %s=%s: %s", res_type, file_key, e)
                 return None
         except Exception as e:  # noqa: BLE001 - 网络/权限等统一降级
-            logger.warning("下载飞书图片异常 image_key=%s: %s", image_key, e)
+            logger.warning("下载飞书资源异常 %s=%s: %s", res_type, file_key, e)
             return None
 
     # ------------------------------------------------------------ 七牛上传
@@ -159,5 +181,5 @@ def _qiniu_info_message(info) -> str:
 
 @lru_cache
 def get_image_service() -> ImageService:
-    """取图片服务单例。"""
+    """取资源服务单例。"""
     return ImageService()

@@ -149,6 +149,8 @@ class ConversationRepo:
             "parent_message_id": m.parent_message_id,
             "topic": m.topic,
             "mentions": mentions or {},
+            # 发送者真实姓名(由上层用 UserNameService 填充;未填充时为空)
+            "sender_name": "",
         }
 
     def list_tree(self, conversation_id: int) -> dict:

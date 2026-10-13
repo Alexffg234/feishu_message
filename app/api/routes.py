@@ -31,6 +31,7 @@ from app.dao.message_repo import MessageRepo
 from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
 from app.services.message_service import MessageService
 from app.services.summary_service import get_summary_service
+from app.services.user_name_service import fill_tree_sender_names
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,8 @@ def api_summary(
         raise HTTPException(status_code=404, detail="对话不存在")
 
     tree = repo.list_tree(conversation_id)
+    # 给树节点补充发送者真实姓名(无论 LLM 是否启用,都展示人名)
+    fill_tree_sender_names(tree["roots"])
     summary = get_summary_service().summarize(conversation_id)
 
     return {

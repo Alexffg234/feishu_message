@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.dao.conversation_repo import ConversationRepo
 from app.services.llm import LLMClient, LLMError
+from app.services.user_name_service import fill_tree_sender_names
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,13 @@ def _mentions_text(text: str, mentions) -> str:
 
 
 def _fmt_rows(rows: list) -> str:
-    """把消息格式化为 LLM 可读的对话文本。"""
+    """把消息格式化为 LLM 可读的对话文本。优先用真实姓名,否则 open_id。"""
     lines = []
     for m in rows:
         text = _mentions_text(_field(m, "text"), _field(m, "mentions")).strip()
         text = text or f"({_field(m, 'message_type') or '非文本'})"
-        sender = _field(m, "sender_id") or "?"
+        # sender_name 由 fill_tree_sender_names 填充;未填充时回退 sender_id(open_id)
+        sender = _field(m, "sender_name") or _field(m, "sender_id") or "?"
         lines.append(f"{sender}: {text}")
     return "\n".join(lines)
 
@@ -95,6 +97,8 @@ class SummaryService:
             tree = repo.list_tree(conversation_id)
             roots = tree["roots"]
 
+        # 给树节点补发送者真实姓名(供 LLM 文本与人名化展示)
+        fill_tree_sender_names(roots)
         messages = [m for r in roots for m in _collect(r)]
         if not messages:
             return base
@@ -113,7 +117,9 @@ class SummaryService:
             return ""
         with SessionLocal() as session:
             repo = ConversationRepo(session)
-            messages = [m for r in repo.list_tree(conversation_id)["roots"] for m in _collect(r)]
+            roots = repo.list_tree(conversation_id)["roots"]
+        fill_tree_sender_names(roots)
+        messages = [m for r in roots for m in _collect(r)]
         if not messages:
             return ""
         try:

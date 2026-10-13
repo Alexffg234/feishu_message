@@ -147,8 +147,9 @@ function renderTree(nodes, depth){
     const m=n.message;
     if(m){
       const body = renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')';
+      const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
       html += '<div class="msg indent-'+Math.min(depth,4)+'">'
-            + '<div class="who">'+esc(shortId(m.sender_id))+'</div>'
+            + '<div class="who">'+esc(who)+'</div>'
             + '<div class="body">'+esc(body)+'</div></div>';
     }
     if(n.children && n.children.length){

@@ -43,6 +43,10 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .msg .msg-img{max-width:320px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;cursor:zoom-in;display:block}
   .msg .msg-video{max-width:360px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;display:block;background:#000}
   .msg .media-name{font-size:12px;color:var(--muted);margin-top:4px;word-break:break-all}
+  .msg .msg-file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:8px 12px;border:1px solid var(--accent);border-radius:8px;background:#eaf3de;font-size:13px;word-break:break-all}
+  .msg .msg-file .fname{color:var(--text);font-weight:500}
+  .msg .msg-file a.dl{text-decoration:none;color:var(--primary);font-weight:500;white-space:nowrap}
+  .msg .msg-file a.dl:hover{text-decoration:underline}
   .indent-0{margin-left:0}
   .indent-1{margin-left:24px;border-left-color:var(--accent)}
   .indent-2{margin-left:48px;border-left-color:#e2a03f}
@@ -162,6 +166,14 @@ function renderTree(nodes, depth){
                    + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
         } else {
           bodyHtml = '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
+        }
+      } else if(m.message_type === 'file'){
+        // 普通文件消息:展示可下载的文件卡片
+        if(m.file_url){
+          bodyHtml = '<span class="msg-file"><span class="fname">'+esc(m.file_name || '文件')+'</span>'
+                   + '<a class="dl" href="'+esc(m.file_url)+'" target="_blank" rel="noopener" download>下载</a></span>';
+        } else {
+          bodyHtml = '<span class="empty-note">[文件(未落盘 '+esc(m.file_name||m.file_key||'')+')]</span>';
         }
       } else if(m.image_url){
         // 图片消息:展示七牛图片

@@ -28,3 +28,7 @@ logs/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 工作区记忆 / 打包产物
+.workbuddy/
+*.zip

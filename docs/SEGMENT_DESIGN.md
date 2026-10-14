@@ -28,7 +28,7 @@
 ### 2.2 两个切段信号（判断边界）
 
 **① 时间断点（硬切）**
-相邻两条消息间隔 > `segment_timeout`（如 15 分钟）→ 强制切开。
+相邻两条消息间隔 > `segment_timeout`（如 10 分钟）→ 强制切开。
 > 群聊沉寂超过阈值，说明上一个话题基本结束。
 
 **② 语义跳变（软切）**
@@ -104,18 +104,32 @@
 
 ---
 
-## 4. 待确认的参数（需真实数据支撑）
+## 4. 待确认的参数(已用真实数据校准)
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `segment_timeout` | 15 分钟 | 时间硬切阈值（可由探查数据调整） |
+| `segment_timeout` | **600 秒(10 分钟)** | 时间硬切阈值。真实探查 P95≈703s(≈12分钟):设定 600s 高于绝大多数话题内间隔、低于跨话题停顿,P95 以上仅剩真正的长停顿。旧默认 15min=900s 偏宽松,仍可微调 8/12/15 分钟 |
 | LLM 每批段数 | 5 | 控制单次调用成本 |
 
-> 通过 `scripts/probe_data.py` 探查真实的消息间隔分布后校准。
+> 已通过 `scripts/probe_data.py` 探查真实数据:105 条 / 18.1 小时 / 11 人,
+> 间隔 P50=24s / P80=156s / P90=426s / P95=703s / P99=2167s,>900s 断点 5 个。
 
 ---
 
-## 5. 上线步骤
+## 5. 实现状态
+
+| 组件 | 文件 | 状态 |
+|---|---|---|
+| ORM 模型 | `app/models/segment.py` | ✅ 已完成 |
+| `messages.segment_id` 迁移 | `app/core/db.py:_ensure_segment_columns` + `app/models/message.py` | ✅ 已完成 |
+| DAO | `app/dao/segment_repo.py` | ✅ 已完成 |
+| 切段服务(硬切+LLM粗并+标记) | `app/services/segment_service.py` | ✅ 已完成 |
+| 离线重算脚本 | `scripts/segment_messages.py` | ✅ 已完成(幂等,支持 --chat/--dry-run/--timeout) |
+| 本地验证 | 时间硬切 / interleaved / 写库回写 / 幂等 / dry-run / LLM合并(全/部分/降级) / 迁移补列 | ✅ 全通过,现有 pytest 11 通过无回归 |
+
+---
+
+## 6. 上线步骤
 
 1. `scripts/probe_data.py` 探查数据（定阈值）
 2. 新增模型 + 建表（`init_db` 自动）

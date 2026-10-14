@@ -32,7 +32,12 @@ _VIDEO_TYPES = ("media",)
 
 
 def _pending(session, chat_id: str | None, limit: int) -> list:
-    """取缺落盘的资源消息(image 缺 image_url / media、file 缺 file_url)。"""
+    """取需重新落盘/刷新的资源消息。
+
+    - image/media:仅挑缺 image_url / file_url 的(补货)
+    - file:无论是否已有 file_url 都进入队列 —— 旧 URL 是修 bug 前生成的,
+      没有 ?attname= 下载扩展名也不对,需要强制重刷以带上正确文件名/Content-Type。
+    """
     stmt = (
         select(Message)
         .where(Message.message_type.in_(("image", "media", "file")))
@@ -45,7 +50,9 @@ def _pending(session, chat_id: str | None, limit: int) -> list:
     out = []
     for m in session.execute(stmt).scalars().all():
         raw = m.raw if isinstance(m.raw, dict) else {}
-        if m.message_type in ("media", "file"):
+        if m.message_type == "file":
+            out.append(m)  # 文件消息一律刷新(更新 attname/mime)
+        elif m.message_type == "media":
             if not raw.get("file_url"):
                 out.append(m)
         else:

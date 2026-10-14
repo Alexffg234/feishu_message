@@ -388,7 +388,9 @@ def _resolve_video(raw: dict, message_id: str) -> None:
     file_key = raw.get("file_key") or ""
     if file_key:
         try:
-            raw["file_url"] = svc.resolve_file_url(file_key, message_id)
+            raw["file_url"] = svc.resolve_file_url(
+                file_key, message_id, file_name=raw.get("file_name") or ""
+            )
         except Exception:  # noqa: BLE001
             logger.warning("处理视频消息异常 file_key=%s", file_key, exc_info=True)
     # 视频封面(本质是图片)
@@ -413,6 +415,8 @@ def _resolve_file(raw: dict, message_id: str) -> None:
         return
     try:
         svc = get_image_service()
-        raw["file_url"] = svc.resolve_file_url(file_key, message_id)
+        raw["file_url"] = svc.resolve_file_url(
+            file_key, message_id, file_name=raw.get("file_name") or ""
+        )
     except Exception:  # noqa: BLE001
         logger.warning("处理文件消息异常 file_key=%s", file_key, exc_info=True)

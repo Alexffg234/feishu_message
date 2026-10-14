@@ -45,6 +45,25 @@
 
 > 注意：同一个 `media` 消息里有两个 key——视频本体 + 封面图，两者要分别下载、分别存储。
 
+### 2.3 普通文件消息（消息类型 `file`）
+
+```json
+{
+  "file_key": "file_v3_0016f_xxxx",
+  "file_name": "PQ-85Q30D.b"
+}
+```
+
+- `file_key`：文件资源标识（下载时 `type=file`）
+- `file_name`：原始文件名（含扩展名），**用于推断上传 MIME 类型 + 下载文件名**
+
+> 普通文件早期容易“打不开/损坏”，根因是七牛 key 无扩展名、Content-Type 为
+> `application/octet-stream`，浏览器无法识别。修复方案：
+> - 上传时按 `file_name` 扩展名设 `mime_type`（用 `mimetypes.guess_type` 推断）；
+> - 下载 URL 追加 `?attname=<urlencode(file_name)>`，七牛据此返回正确的
+>   `Content-Disposition: attachment; filename=`，浏览器即可按正确文件名下载。
+> 图片（`image`）不追加 attname，保持直接预览。
+
 ---
 
 ## 3. 核心原理：两个关键接口
@@ -120,7 +139,8 @@ https://{qiniu_domain}/{qiniu}/{images|files}/{file_key}
 3. 对 `media` 消息调用 `_resolve_video(raw, message_id)`
 4. 二者内部都委托给 `app/services/image_service.py` 的 `ImageService`：
    - `resolve_image_url(image_key, message_id)` → 下载 + 上传 → 返回 URL
-   - `resolve_file_url(file_key, message_id)` → 下载 + 上传 → 返回 URL
+   - `resolve_file_url(file_key, message_id, file_name="")` → 下载 + 上传 → 返回 URL
+     `file_name` 非空时：按扩展名设上传 `mime_type`，且 URL 追加 `?attname=<file_name>`。
 5. 得到的 URL 写回 `raw["image_url"]` / `raw["file_url"]`，随消息一起入库。
 
 ### 4.2 落库字段（存储在 `messages.raw` JSON 列）
@@ -130,8 +150,10 @@ https://{qiniu_domain}/{qiniu}/{images|files}/{file_key}
 | image | `image_key` | 飞书原始凭证（临时） |
 | image | `image_url` | 七牛可展示 URL（永久） |
 | media | `file_key` / `file_name` / `duration` | 视频元信息 |
-| media | `file_url` | 视频本体七牛 URL |
+| media | `file_url` | 视频本体七牛 URL（带 `?attname=`） |
 | media | `image_key` / `image_url` | 视频封面（image_url 为七牛封面 URL） |
+| file | `file_key` / `file_name` | 普通文件元信息 |
+| file | `file_url` | 七牛文件 URL（带 `?attname=` + 正确 mime） |
 
 ---
 

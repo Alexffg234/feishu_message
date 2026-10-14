@@ -17,8 +17,10 @@ file_key 下载成二进制,再上传到七牛对象存储,生成长期稳定的
 from __future__ import annotations
 
 import logging
+import mimetypes
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import GetMessageResourceRequest
@@ -44,9 +46,13 @@ class ImageService:
         """把飞书图片资源(image_key)转成可展示的七牛 URL。"""
         return self._resolve_resource(image_key, message_id, "image", "images")
 
-    def resolve_file_url(self, file_key: str, message_id: str = "") -> str:
-        """把飞书视频/文件资源(file_key)转成可展示的七牛 URL(type=file)。"""
-        return self._resolve_resource(file_key, message_id, "file", "files")
+    def resolve_file_url(self, file_key: str, message_id: str = "", file_name: str = "") -> str:
+        """把飞书视频/文件资源(file_key)转成可展示的七牛 URL(type=file)。
+
+        file_name: 原始文件名(如 "新建文本文档.txt"),用于推断上传 MIME 类型
+        和给下载 URL 追加 ?attname,保证浏览器按正确文件名+扩展名下载。
+        """
+        return self._resolve_resource(file_key, message_id, "file", "files", file_name=file_name)
 
     def _resolve_resource(
         self,
@@ -54,11 +60,16 @@ class ImageService:
         message_id: str,
         res_type: ResType,
         save_dir: str,
+        file_name: str = "",
     ) -> str:
         """把飞书消息资源(file_key)下载并上传七牛,返回可访问 URL。
 
         res_type: 'image' 或 'file'(飞书接口只区分这两种)。
         save_dir: 七牛上的目录名,如 images / files。
+        file_name: 原始文件名。非空时:
+          - 按扩展名推断 mime_type 写入七牛(修正 Content-Type);
+          - URL 追加 ?attname=<urlencode(file_name)>,让七牛返回正确的
+            Content-Disposition: attachment; filename=,浏览器即可按正确文件名下载。
         返回七牛可访问 URL;下载/上传失败或未配置则返回空串(调用方保留 file_key)。
         """
         if not file_key:
@@ -82,12 +93,18 @@ class ImageService:
 
         # 上传到七牛,key 用 file_key(天然唯一,且能对回去原资源)
         key = f"{_PROVIDER}/{save_dir}/{file_key}"
-        ok, _err = self._upload_to_qiniu(key, data)
+        # 按文件名扩展名推断 MIME 类型,让七牛的 Content-Type 正确(否则默认
+        # application/octet-stream,浏览器无法识别文件类型,表现为"打不开/损坏")。
+        mime_type = _guess_mime(file_name)
+        ok, _err = self._upload_to_qiniu(key, data, mime_type=mime_type)
         if not ok:
             logger.warning("上传资源到七牛失败 %s=%s", res_type, file_key)
             return ""
 
         url = f"{settings.qiniu_domain.rstrip('/')}/{key}"
+        # 文件类型:追加 ?attname= 让七牛返回正确 Content-Disposition,下载文件名带扩展名。
+        if file_name:
+            url = f"{url}?attname={quote(file_name)}"
         logger.info("资源已落盘(%s): %s -> %s", res_type, file_key, url)
         return url
 
@@ -137,7 +154,9 @@ class ImageService:
             return None
 
     # ------------------------------------------------------------ 七牛上传
-    def _upload_to_qiniu(self, key: str, data: bytes) -> tuple[bool, str]:
+    def _upload_to_qiniu(
+        self, key: str, data: bytes, mime_type: str = "application/octet-stream"
+    ) -> tuple[bool, str]:
         """把字节上传到七牛。返回 (是否成功, 出错信息)。"""
         try:
             from qiniu import Auth, put_data
@@ -145,7 +164,7 @@ class ImageService:
             settings = get_settings()
             auth = Auth(settings.qiniu_access_key, settings.qiniu_secret_key)
             token = auth.upload_token(settings.qiniu_bucket, key)
-            ret, info = put_data(token, key, data=data)
+            ret, info = put_data(token, key, data=data, mime_type=mime_type)
             if info is not None and info.status_code == 200:
                 return True, ""
             msg = _qiniu_info_message(info)
@@ -177,6 +196,18 @@ def _qiniu_info_message(info) -> str:
         return f"status={code} {str(text_body)[:200]}"
     except Exception:  # noqa: BLE001
         return "unknown qiniu error"
+
+
+def _guess_mime(file_name: str) -> str:
+    """按文件名扩展名推断 MIME 类型;无法推断时回退 octet-stream。
+
+    飞书上传的普通文件(如 .b / .txt)若不设正确 Content-Type,七牛默认返回
+    application/octet-stream,浏览器无法识别,表现为文件打不开/损坏。
+    """
+    if not file_name:
+        return "application/octet-stream"
+    mime, _enc = mimetypes.guess_type(file_name)
+    return mime or "application/octet-stream"
 
 
 @lru_cache

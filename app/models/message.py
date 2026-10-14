@@ -87,6 +87,13 @@ class Message(Base):
         default=0,
         index=True,
     )
+    # 所属话题段主键(message_segments.id);0=尚未归段
+    segment_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=False,
+        default=0,
+        index=True,
+    )
     # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
     # 原始结构化数据(图片/文件等附加字段)

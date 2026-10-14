@@ -67,6 +67,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_message_group_columns()
     _ensure_conversation_columns()
+    _ensure_segment_columns()
     logger.info("数据库表结构就绪: %s", get_settings().database_url)
 
 
@@ -125,6 +126,31 @@ def _ensure_conversation_columns() -> None:
             )
         )
         logger.info("messages 表新增列 conversation_id")
+
+
+def _ensure_segment_columns() -> None:
+    """轻量迁移:为存量 messages 表补 segment_id 列(FK→message_segments.id)。
+
+    segment_id 默认 0 = 尚未归段,由离线重算脚本(scripts/segment_messages.py)
+    统一切段并回填。新建的 messages 表上 create_all 已含该列,这里只处理存量。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "messages" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("messages")}
+    if "segment_id" in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "ALTER TABLE messages ADD COLUMN segment_id "
+                "BIGINT NOT NULL DEFAULT 0"
+            )
+        )
+        logger.info("messages 表新增列 segment_id")
 
 
 def check_db_connection() -> bool:

@@ -18,7 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.segment_service import SegmentService  # noqa: E402
+from app.services.segment_service import (  # noqa: E402
+    SegmentService,
+    get_segment_service,
+)
 
 
 def _show(detail: dict, idx: int) -> None:
@@ -36,7 +39,13 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="只预览结果,不写库")
     args = ap.parse_args()
 
-    svc = SegmentService(timeout_sec=args.timeout)
+    # 通过 get_segment_service 获取,自动按服务器 LLM 配置启用软切;
+    # 配了 LLM_API_KEY/LLM_MODEL 则启用语义合并,未配则退化为纯时间规则。
+    svc = get_segment_service(timeout_sec=args.timeout)
+    if svc.enabled:
+        print("LLM 软切已启用(将合并内容相关但间隔略超阈值的相邻段)")
+    else:
+        print("未检测到 LLM 配置,使用纯时间规则切段(可后续配置 LLM 后重算)")
 
     if args.chat:
         res = svc.segment_chat(args.chat, dry_run=args.dry_run)

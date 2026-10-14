@@ -32,10 +32,10 @@ _VIDEO_TYPES = ("media",)
 
 
 def _pending(session, chat_id: str | None, limit: int) -> list:
-    """取缺落盘的资源消息(image 缺 image_url / media 缺 file_url)。"""
+    """取缺落盘的资源消息(image 缺 image_url / media、file 缺 file_url)。"""
     stmt = (
         select(Message)
-        .where(Message.message_type.in_(("image", "media")))
+        .where(Message.message_type.in_(("image", "media", "file")))
         .order_by(Message.id)
         .limit(limit)
     )
@@ -45,7 +45,7 @@ def _pending(session, chat_id: str | None, limit: int) -> list:
     out = []
     for m in session.execute(stmt).scalars().all():
         raw = m.raw if isinstance(m.raw, dict) else {}
-        if m.message_type == "media":
+        if m.message_type in ("media", "file"):
             if not raw.get("file_url"):
                 out.append(m)
         else:
@@ -57,7 +57,10 @@ def _pending(session, chat_id: str | None, limit: int) -> list:
 def _fill(m: Message, dry_run: bool) -> bool:
     """补一条资源消息的资源 URL。返回是否补齐成功。"""
     raw = m.raw if isinstance(m.raw, dict) else {}
-    if m.message_type == "media":
+    if m.message_type == "file":
+        ms._resolve_file(raw, m.message_id or "")
+        filled = bool(raw.get("file_url"))
+    elif m.message_type == "media":
         ms._resolve_video(raw, m.message_id or "")
         filled = bool(raw.get("file_url"))
     else:
@@ -82,7 +85,7 @@ def backfill(dry_run: bool, chat_id: str | None, limit: int) -> int:
         ok = 0
         for m in pending:
             raw = m.raw if isinstance(m.raw, dict) else {}
-            tag = "media" if m.message_type == "media" else "image"
+            tag = m.message_type  # image / media / file
             key = raw.get("file_key") or raw.get("image_key") or ""
             if _fill(m, dry_run):
                 ok += 1

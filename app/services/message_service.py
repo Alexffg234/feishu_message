@@ -71,6 +71,8 @@ class MessageService:
                 _resolve_image(raw, msg.message_id or "")
             elif msg_type == "media":
                 _resolve_video(raw, msg.message_id or "")
+            elif msg_type == "file":
+                _resolve_file(raw, msg.message_id or "")
 
 
         # 解析回复关系(仅回复消息带 parent_id / root_id)
@@ -397,3 +399,20 @@ def _resolve_video(raw: dict, message_id: str) -> None:
             raw["image_url"] = svc.resolve_image_url(cover_key, message_id)
         except Exception:  # noqa: BLE001
             logger.warning("处理视频封面异常 image_key=%s", cover_key, exc_info=True)
+
+
+def _resolve_file(raw: dict, message_id: str) -> None:
+    """普通文件消息(content 结构 {file_key, file_name} 等)。
+
+    用 file_key + type=file 下载上传七牛,生成可访问 URL 写入 raw.file_url。
+    保留 file_name 供展示。未配置/失败优雅降级(保留 file_key),不阻塞入库。
+    """
+    raw.setdefault("file_url", "")
+    file_key = raw.get("file_key") or ""
+    if not file_key:
+        return
+    try:
+        svc = get_image_service()
+        raw["file_url"] = svc.resolve_file_url(file_key, message_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("处理文件消息异常 file_key=%s", file_key, exc_info=True)

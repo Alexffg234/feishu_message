@@ -2,7 +2,9 @@
 
 - 入库不阻塞:消息落库后由后台线程池异步分类
 - 以「回复链分组」为粒度打标签(1 组 = 1 次 LLM 调用),组内共享同一 topic
-- 分类时把库里已有主题列表传给 LLM,保证同义话题沿用同一标签
+- 分类时把库里已有主题列表(附最近消息摘要)传给 LLM,保证同一问题沿用同一标签
+- 打完标签触发同主题归组:同群内相同 topic 的组归并到最早组
+  (「直接发言无回复」的碎片反馈靠标签归回原问题块,不依赖时间窗)
 - 未配置 LLM / 调用失败时优雅降级:topic 留空,后续可重分类
 """
 from __future__ import annotations
@@ -16,7 +18,9 @@ from functools import lru_cache
 
 from app.core.config import get_settings
 from app.core.db import SessionLocal
+from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
+from app.services.group_merge import merge_topic_group
 from app.services.llm import LLMClient, LLMError
 
 logger = logging.getLogger(__name__)
@@ -25,7 +29,9 @@ _SYSTEM_PROMPT = (
     "你是群聊消息主题分类器。请把下面这段对话归纳为一个简短主题标签。\n"
     "要求:\n"
     "1. 标签为 2~10 字中文短语,概括对话讨论的功能或问题(例如:投屏、远场语音唤不醒、蓝牙连接)。\n"
-    "2. 若「已有主题」列表中存在相近主题,必须原样沿用该标签,不得新造同义标签。\n"
+    "2. 若「前文消息」或「已有主题」显示当前对话是同一问题/同一故障案例的延续"
+    "(同一台机器、同一故障,即便措辞不同),必须原样沿用对应的已有标签,\n"
+    "   不得新造同义标签,也不得换成更细粒度的标签;只有确实是全新问题时才允许新标签。\n"
     "3. 只输出标签本身,不要引号、标点或任何解释。"
 )
 
@@ -33,6 +39,8 @@ _SYSTEM_PROMPT = (
 _RETRY_COOLDOWN = 60
 # 送给 LLM 的每组消息条数上限(控制 token)
 _MAX_ROWS_PROMPT = 20
+# 送给 LLM 的组前上下文消息条数(帮助判断是否延续前面讨论)
+_MAX_CONTEXT = 6
 
 
 def _fmt_time(create_time: str) -> str:
@@ -44,12 +52,22 @@ def _fmt_time(create_time: str) -> str:
         return create_time or "-"
 
 
+# 纯语气词/确认词:不构成主题,当作空标签重试
+_STOP_LABELS = {
+    "好的", "好", "收到", "嗯", "嗯嗯", "哦", "哦哦", "是", "是的", "对",
+    "对对", "可以", "行", "ok", "ok的", "明白", "了解", "知道了",
+    "谢谢", "好的谢谢", "好滴", "嗯好", "好嘞",
+}
+
+
 def _clean_label(raw: str) -> str:
-    """清洗 LLM 输出:去引号/空白/首尾标点,截断到 20 字。"""
+    """清洗 LLM 输出:去引号/空白/首尾标点,截断到 20 字;语气词垃圾标签置空。"""
     label = (raw or "").strip().strip("\"'“”‘’「」 ")
     label = label.strip("。.!,!;；:：")
     if len(label) > 20:
         label = label[:20]
+    if label.lower() in _STOP_LABELS:
+        return ""
     return label
 
 
@@ -102,29 +120,83 @@ class TopicService:
             with self._lock:
                 self._pending.discard(key)
 
-    def classify_group(self, chat_id: str, root_message_id: str) -> str:
+    def classify_group(
+        self, chat_id: str, root_message_id: str, merge: bool = True
+    ) -> str:
         """同步为一组消息打主题标签(亦供 --reclassify 使用)。
 
-        已分类的组直接返回现有标签。失败抛 LLMError。
+        已分类的组直接返回现有标签(merge=True 时仍尝试同主题归组)。
+        merge=False 供回填脚本先只打标签不归并。失败抛 LLMError。
         """
         if not self.enabled:
             raise LLMError("LLM 未配置,无法分类")
+        label = ""
+        to_merge = ""
         with self._session_factory() as session:
             repo = MessageRepo(session)
             rows = repo.list_by_root(root_message_id, chat_id)
             if not rows:
                 return ""
             existing_topic = next((m.topic for m in rows if m.topic), "")
+            if not existing_topic and not any((m.text or "").strip() for m in rows):
+                # 纯附件组(全为图片/视频/语音,无文本):LLM 无文本信号,
+                # 不产「图片」这类泛标签,保持未标记独立成组
+                return ""
             if existing_topic:
-                return existing_topic
-            existing = repo.get_existing_topics(limit=50)
-            label = self._llm_label(rows, existing)
-            if not label:
-                raise LLMError("LLM 返回空标签")
-            repo.set_topic_for_group(chat_id, root_message_id, label)
-            session.commit()
-            logger.info("主题分类 %s/%s -> %s", chat_id, root_message_id, label)
-            return label
+                # 分类后新到达的组内消息 topic 为空,统一回填(幂等 UPDATE)
+                repo.set_topic_for_group(chat_id, root_message_id, existing_topic)
+                ConversationRepo(session).set_topic(chat_id, root_message_id, existing_topic)
+                session.commit()
+                label = existing_topic
+                to_merge = existing_topic if merge else ""
+            else:
+                samples = self._existing_topic_samples(repo, chat_id)
+                first_id = min(m.id for m in rows)
+                context = repo.list_recent_before(chat_id, first_id, limit=6)
+                label = self._llm_label(rows, samples, context)
+                if not label:
+                    raise LLMError("LLM 返回空标签")
+                repo.set_topic_for_group(chat_id, root_message_id, label)
+                # conversations.topic 此前无人写入(页面读到恒为空),随分类同步
+                ConversationRepo(session).set_topic(chat_id, root_message_id, label)
+                session.commit()
+                logger.info("主题分类 %s/%s -> %s", chat_id, root_message_id, label)
+                to_merge = label if merge else ""
+        # 归并用独立 session,避免与分类 session 并发占用连接
+        if to_merge:
+            self._merge_topic(chat_id, to_merge)
+        return label
+
+    def _merge_topic(self, chat_id: str, topic: str) -> None:
+        """打完标签后触发同主题归组。归并失败只告警,不影响分类结果。"""
+        try:
+            with self._session_factory() as session:
+                merged = merge_topic_group(session, chat_id, topic)
+                if merged:
+                    logger.info(
+                        "同主题归组 %s/%s: %d 组并入最早组",
+                        chat_id,
+                        topic,
+                        len(merged),
+                    )
+        except Exception:  # noqa: BLE001
+            logger.exception("同主题归组失败(不影响分类) %s/%s", chat_id, topic)
+
+    @staticmethod
+    def _existing_topic_samples(
+        repo: MessageRepo, chat_id: str, limit: int = 50
+    ) -> list[tuple[str, str]]:
+        """已有主题摘要:优先同群,不足再用全局,去重后截断。"""
+        samples = repo.get_topic_samples(chat_id=chat_id, limit=limit)
+        if len(samples) < limit:
+            seen = {t for t, _s in samples}
+            for topic, text in repo.get_topic_samples(limit=limit):
+                if topic not in seen:
+                    samples.append((topic, text))
+                    seen.add(topic)
+                if len(samples) >= limit:
+                    break
+        return samples
 
     def wait_idle(self, timeout: float = 30.0) -> None:
         """等待后台分类任务全部完成(测试用)。"""
@@ -194,15 +266,37 @@ class TopicService:
             return result
 
     # ---------------------------------------------------------------- 内部
-    def _llm_label(self, rows: list, existing_topics: list[str]) -> str:
+    def _llm_label(
+        self,
+        rows: list,
+        samples: list[tuple[str, str]],
+        context: list | None = None,
+    ) -> str:
         lines = []
         for m in rows[:_MAX_ROWS_PROMPT]:
             text = (m.text or "").strip() or f"({m.message_type or '非文本'})"
             lines.append(f"[{_fmt_time(m.create_time)}] {m.sender_id or '?'}: {text}")
-        existing_str = ", ".join(existing_topics) if existing_topics else "(暂无)"
+        if samples:
+            # 附最近消息摘要,便于 LLM 判断「是否同一问题」而沿用标签
+            existing_str = "\n".join(
+                f"- {topic}: {text or '(无摘要)'}" for topic, text in samples
+            )
+        else:
+            existing_str = "(暂无)"
+        ctx_lines = []
+        for m in (context or [])[:_MAX_CONTEXT]:
+            text = (m.text or "").strip()
+            if not text:
+                continue
+            tag = f"(主题: {m.topic})" if m.topic else ""
+            ctx_lines.append(
+                f"[{_fmt_time(m.create_time)}] {m.sender_id or '?'}{tag}: {text[:60]}"
+            )
+        context_str = "\n".join(ctx_lines) if ctx_lines else "(无)"
         user_prompt = (
-            f"已有主题: {existing_str}\n\n"
-            f"对话内容:\n" + "\n".join(lines)
+            f"本组之前的最近消息(按时间升序,用于判断是否延续前面讨论):\n{context_str}\n\n"
+            f"已有主题(附各主题最近一条消息摘要):\n{existing_str}\n\n"
+            f"当前对话内容:\n" + "\n".join(lines)
         )
         raw = self._llm.chat(_SYSTEM_PROMPT, user_prompt)
         return _clean_label(raw)

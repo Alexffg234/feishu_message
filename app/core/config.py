@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # 0 = 禁用合并(每条独立消息自成一组)。
     turn_merge_seconds: int = 30
 
+    # ---------- 同主题归组 ----------
+    # LLM 主题分类完成后,同群内相同 topic 标签的回复链组自动归并为一个对话
+    # (「直接发言无回复」的碎片反馈靠标签归回原问题块,不依赖时间窗)。
+    # False = 只打标签不归并。
+    topic_merge_enabled: bool = True
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)

@@ -157,3 +157,106 @@ class MessageRepo:
             stmt = stmt.where(Message.chat_id == chat_id)
         stmt = stmt.order_by(Message.received_at.asc(), Message.id.asc()).limit(limit)
         return list(self._session.scalars(stmt).all())
+
+    def list_topic_roots(self, chat_id: str, topic: str) -> list[tuple[str, int]]:
+        """同群同 topic 的所有分组,返回 [(root_message_id, first_message_id)]。
+
+        按最早消息 id 升序(最旧组在前),供同主题归组决定归并方向。
+        """
+        first_id = func.min(Message.id).label("first_id")
+        stmt = (
+            select(Message.root_message_id, first_id)
+            .where(
+                Message.chat_id == chat_id,
+                Message.topic == topic,
+                Message.root_message_id != "",
+            )
+            .group_by(Message.root_message_id)
+            .order_by(first_id.asc())
+        )
+        return [(r[0], int(r[1])) for r in self._session.execute(stmt).all()]
+
+    def list_all_topic_groups(
+        self, chat_id: str | None = None, limit: int = 100000
+    ) -> list[tuple[str, str, str, int]]:
+        """所有已打标签的组,返回 [(chat_id, topic, root, first_id)] 按最早消息升序。
+
+        供归并回填脚本按 (chat, topic) 规划归并对。
+        """
+        first_id = func.min(Message.id).label("first_id")
+        stmt = (
+            select(Message.chat_id, Message.topic, Message.root_message_id, first_id)
+            .where(Message.topic != "", Message.root_message_id != "")
+            .group_by(Message.chat_id, Message.topic, Message.root_message_id)
+            .order_by(first_id.asc())
+            .limit(limit)
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        return [
+            (r[0], r[1], r[2], int(r[3]))
+            for r in self._session.execute(stmt).all()
+        ]
+
+    def get_topic_samples(
+        self, chat_id: str | None = None, limit: int = 50
+    ) -> list[tuple[str, str]]:
+        """每个已有主题取最新一条消息文本作摘要,返回 [(topic, text)]。
+
+        分类提示词用它让 LLM 判断「是否同一问题」,优先同群(chat_id)。
+        """
+        stmt = (
+            select(Message.topic, Message.text, Message.id)
+            .where(Message.topic != "")
+            .order_by(Message.id.desc())
+            .limit(2000)
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        samples: dict[str, str] = {}
+        for topic, text, _mid in self._session.execute(stmt):
+            if topic not in samples:
+                samples[topic] = (text or "").strip()[:50]
+            if len(samples) >= limit:
+                break
+        return list(samples.items())
+
+    def list_recent_before(
+        self, chat_id: str, before_id: int, limit: int = 6
+    ) -> list:
+        """同群内、id 小于 before_id 的最近 limit 条消息,按时间升序。
+
+        主题分类时作上下文:让 LLM 判断当前组是否延续前面讨论。
+        """
+        stmt = (
+            select(Message)
+            .where(Message.chat_id == chat_id, Message.id < before_id)
+            .order_by(Message.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(self._session.execute(stmt).scalars().all()))
+
+    def list_topic_openings(
+        self, chat_id: str | None = None, limit: int = 100
+    ) -> list[tuple[str, str]]:
+        """每个主题取最早一条有信息量的消息作样本,返回 [(topic, text)]。
+
+        归并判定时用案例开场消息比最新消息(常是「收到」类)更有代表性;
+        过短文本(<6字)跳过。
+        """
+        stmt = (
+            select(Message.topic, Message.text, Message.id)
+            .where(Message.topic != "")
+            .order_by(Message.id.asc())
+            .limit(5000)
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        samples: dict[str, str] = {}
+        for topic, text, _mid in self._session.execute(stmt):
+            t = (text or "").strip()
+            if topic not in samples and len(t) >= 6:
+                samples[topic] = t[:50]
+            if len(samples) >= limit:
+                break
+        return list(samples.items())

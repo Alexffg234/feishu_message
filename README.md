@@ -192,12 +192,53 @@ GET /messages/groups?chat_id=oc_xxx&limit=20
 
 合并后的消息块与回复链、主题维度正交叠加：A 连发 3 条、B 回复其中一条，4 条同属一个块/对话。
 
+### 同主题归组(无回复的碎片反馈归回原问题块)
+
+「直接发言无回复」的追问/反馈(有人甚至隔半天才回，时间窗不可靠)无法靠回复链归组，
+等该组的 **LLM 主题标签** 打完后，按标签归并：
+
+- 同一群内、topic 标签**完全相同**的多个回复链组 → 归并为一个对话，**最早组保留为根**(原问题块)。
+- 归并迁移 `messages.root_message_id/conversation_id`、`message_links` 回复边，删除多余对话行并重算统计；幂等可重复执行。
+- 提示词机制(保证碎片组贴出一致标签):
+  - **前文上下文**:分类时附该组之前同群最近 6 条消息(带各自话题标签),当前组是前面讨论的延续时沿用其标签;
+  - **已有主题摘要**:附各主题最近消息摘要,同一问题沿用已有标签,避免碎片组被贴成更细的同义标签;
+  - **纯附件组**(整组只有图片/视频/语音、无文本)不打标签,不产「图片」这类泛标签,保持独立成组;
+  - **语气词守卫**:「好的/收到/嗯」等纯语气词视为空标签重试,避免垃圾标签污染归并;
+  - **近义标签归并**(`--consolidate`):LLM 输入全部标签 + 各标签案例开场样本,判定哪些标签属同一故障案例(开场症状+诊断+处理+验证),统一到保留标签后再触发同标签归并。
+- 开关：`TOPIC_MERGE_ENABLED=False` 时只打标签不归并。
+- 存量数据回填：
+
+```bash
+python scripts/rethread_backfill.py --dry-run                 # 预览将归并的组对
+python scripts/rethread_backfill.py --reclassify              # 先给未分类组补标签,再归并
+python scripts/rethread_backfill.py --relabel --consolidate   # 清空标签按时间序重打(前文带标签)+近义标签归并,再归并
+python scripts/rethread_backfill.py --chat oc_xxx             # 仅处理指定群
+```
+
+### 会话缝合(同一问题处理过程被拆散时合并)
+
+同标签归并依赖 LLM 标签;当用户「只 @ 不回复」、各组无标签或标签是垃圾词
+(如「好的」)时,同一问题处理过程(提问→排查→多轮对话→给出解决方案)会拆成多个会话。
+会话缝合不依赖标签:把相邻会话的代表消息(首条/末条/最长)直接送 LLM 按生命周期判定,
+重叠窗口 + 并查集传递闭包,把同过程会话合并到最早会话(复用 `merge_groups`,幂等)。
+
+```bash
+# 本地验证(推荐):先只读导出到本地 sqlite,在副本上改,真实库不动
+python scripts/export_chat.py --chat oc_xxx --out data/local.sqlite
+python scripts/stitch_conversations.py --chat oc_xxx --db data/local.sqlite           # 预览拟合并对
+python scripts/stitch_conversations.py --chat oc_xxx --db data/local.sqlite --apply   # 在本地副本执行
+
+# 直接在库上执行(默认预览,--apply 才写库);循环「预览→apply」直到无拟合并对
+python scripts/stitch_conversations.py --chat oc_xxx --apply
+```
+
 ## 主题分类(LLM)
 
 在回复链分组之上再按「主题」聚合:把讨论同一类问题(如「投屏」「远场语音唤不醒」)的所有问答组聚到一个主题下,形成 **主题 → 回复链组 → 消息** 三层结构。
 
 - 每个回复链组入库后,由**后台线程**调用 LLM(OpenAI 兼容接口)打一个 2~10 字的主题标签,不阻塞消息落库。
-- 分类时把库里**已有主题列表**一并传给 LLM,同义话题沿用同一标签,保证聚合稳定。
+- 分类提示词 = 前文最近 6 条消息(带话题标注) + 已有主题列表(附最近消息摘要) + 当前组内容,同一问题沿用同一标签,保证聚合稳定。
+- 打完标签即触发上面的**同主题归组**;`conversations.topic` 随分类同步写入(总结页/列表展示)。
 - 在 `config/.env` 配置 `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` 启用;留空则禁用(消息正常入库,只是不归类)。
 - 未分类的历史组可用 `python scripts/query_messages.py --reclassify` 补打标签。
 

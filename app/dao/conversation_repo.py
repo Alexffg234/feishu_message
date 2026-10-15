@@ -46,6 +46,18 @@ class ConversationRepo:
         self._session.flush()  # 拿到 id 而不 commit,交给调用方统一提交
         return conv
 
+    def set_topic(self, chat_id: str, root_message_id: str, topic: str) -> int:
+        """同步对话表的 topic 标签(messages.topic 由 MessageRepo 写)。"""
+        stmt = (
+            update(Conversation)
+            .where(
+                Conversation.chat_id == chat_id,
+                Conversation.root_message_id == root_message_id,
+            )
+            .values(topic=topic)
+        )
+        return self._session.execute(stmt).rowcount or 0
+
     def update_group_stats(self, conversation_id: int) -> None:
         """重算对话的 message_count / participant_count / 时间范围。"""
         # 先 flush 挂起的 conversation_id 修改,确保统计能读到最新值

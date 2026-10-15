@@ -1,6 +1,7 @@
 """主题簇聚类服务（只读）—— 把复杂对话按主题归类整理。
 
-对应设计文档 docs/TOPIC_CLUSTER_DESIGN.md 的 L1(降噪) / L2(时间硬切) / L4(聚类) 层落地。
+对应设计文档 docs/TOPIC_CLUSTER_DESIGN.md 的 L1(降噪) / L2(时间硬切) / L4(聚类) 层落地；
+「话题信息收录完整性」补强见 docs/TOPIC_COMPLETENESS.md。
 
 核心思想：群聊消息在时间流里多线程交织、回复链断裂，光靠"切段"不够，
 必须再加一层「跨段时间的语义聚合」，把被交织/断裂打散的同类讨论重新聚成一个个「主题簇」。
@@ -12,11 +13,16 @@
   并配合「短回复就近接话」处理不带关键词的接话。
 可选接入 LLM：增强主题措辞(L5b 概括) 与 模糊边界判定(同话题兜底)。
 
+「话题信息收录完整」三层补强（保证一个话题的所有信息都进簇）：
+  A. 显式回复链强并入 —— parent/root 已在某簇 ⇒ 强制并入(问答对/回复串不拆散)
+  B. 噪声回应就近挂靠 —— "收到/好的/嗯"不再丢弃, 挂靠为 is_filler 参与节点
+  C. 非文本证据收录   —— 图片/文件/视频挂靠为证据, file_name 进 evidence 列表
+
 流程：
   L1 降噪：过滤"收到/好的/嗯"等无实义短消息、归一化图片/文件/链接/@
   L2 硬切：timeout(600s) 切出粗时间段，跨沉寂必为不同话题
   L4 聚类：段内消息逐个喂给「衰减质心」聚类，允许时间不连续的同话题归到同一簇(核心)
-  L5 输出：主题簇列表（话题/条数/人数/代表消息/簇内消息/交错标记）
+  L5 输出：主题簇列表（话题/条数/人数/代表消息/簇内消息/交错标记/回应数/证据文件）
 """
 from __future__ import annotations
 
@@ -48,6 +54,9 @@ _DECAY_FLOOR = 0.05
 _REENTRY_WINDOW_SEC = 1800
 # 无内容相似但时间紧邻时, 短回复(<=字数)就近并入最近活跃簇(处理"收到/我遇到了"这类接话)
 _SHORT_REPLY_MAX_CHARS = 6
+# 噪声/非文本消息(收到/好的/图片/文件等)就近挂靠的时间窗(秒)——
+# 落在此窗内则挂靠到"当前在聊的话题簇", 计入 message_count 但不算主题发言
+_FILLER_WINDOW_SEC = 1200
 
 # ---------------------------------------------------------------- L1 降噪
 _NOISE_EXACT = {
@@ -200,6 +209,9 @@ class _Cluster:
     - 每条并入的消息先对质心做指数衰减(让老主题 token 淡出), 再叠加新消息特征;
     - 由此质心"跟随"近期内容演化, 交错返场的话题(投屏又回来)仍能与本簇匹配,
       —— 这正是「跨段时间的语义聚合」(L4 核心)对交织话题的解法。
+    - 簇还收录两类"参与节点", 保证话题信息完整(不改变质心):
+        噪声回应(收到/好的) → is_filler=true, 计入 filler_count;
+        非文本证据(图片/文件) → 记入 evidence 文件列表。
     """
 
     def __init__(self, weights: Counter, rows: Optional[list] = None, topic: str = ""):
@@ -208,8 +220,12 @@ class _Cluster:
         self.topic = topic or _topic_from_weights(self.weights)
         self.start_topic = self.topic  # 本簇起点话题(用于观察"从何聊起")
         self.last_sec: Optional[float] = None  # 簇内最近一条消息的时间(秒)
+        self.filler_count = 0  # 噪声回应节点数(收到/好的等)
+        self.evidence: list[dict] = []  # 非文本证据文件(图片/文件/视频)
+        self._filler_ids: set[str] = set()  # 噪声回应节点的 message_id(供输出标记)
 
     def add(self, m, label: str = "") -> None:
+        """并入一条"有主题内容"的消息(更新衰减质心 + 主题)。"""
         self.rows.append(m)
         sec = _to_sec(m.create_time)
         if sec is not None:
@@ -221,11 +237,49 @@ class _Cluster:
         # 质心跟随近期内容演化, 主话题随之更新(保留 start_topic 观察话题漂移)
         self.topic = _topic_from_weights(self.weights) or self.topic
 
+    def add_node(self, m, filler: bool = False) -> None:
+        """并入一条"参与节点"(噪声回应/非文本证据), 不改动质心与主题。"""
+        self.rows.append(m)
+        sec = _to_sec(m.create_time)
+        if sec is not None:
+            self.last_sec = sec
+        if filler:
+            self.filler_count += 1
+            if m.message_id:
+                self._filler_ids.add(m.message_id)
+        else:
+            self._collect_evidence(m)
+
+    def _collect_evidence(self, m) -> None:
+        """从非文本消息提取证据文件信息, 存入 evidence 列表。"""
+        mtype = m.message_type or ""
+        if mtype in ("", "text"):
+            return
+        entry = {"type": mtype}
+        raw = m.raw or {}
+        fname = raw.get("file_name") or raw.get("name") or ""
+        if fname:
+            entry["file_name"] = fname
+        if raw.get("mime_type"):
+            entry["mime_type"] = raw["mime_type"]
+        if raw.get("file_key"):
+            entry["file_key"] = raw["file_key"]
+        if entry not in self.evidence:
+            self.evidence.append(entry)
+
     def reentry_ok(self, msg_sec: Optional[float], window: int = _REENTRY_WINDOW_SEC) -> bool:
         """该消息是否在簇的「回看窗口」内(中等相似时才要求)。"""
         if self.last_sec is None or msg_sec is None:
             return True
         return (msg_sec - self.last_sec) <= window
+
+
+# 非文本消息类型(无正文, 不参与聚类特征, 作为证据挂靠)
+_NON_TEXT_TYPES = ("image", "media", "file", "video", "audio")
+
+
+def _is_nontext(m) -> bool:
+    return (m.message_type or "") in _NON_TEXT_TYPES
 
 
 def _topic_from_weights(w: Counter, max_len: int = 8) -> str:
@@ -302,46 +356,94 @@ def cluster_chat(
     # L2 硬切(粗时间段)
     segments = _segment_rows(rows, timeout_sec)
     clusters: list[_Cluster] = []
+    msg_to_cluster: dict[str, int] = {}  # 消息 message_id -> 簇下标(供回复链强并入)
+
+    def _new_cluster(w, m) -> int:
+        """新建一个簇并把首条消息登记;返回簇下标。"""
+        clusters.append(_Cluster(w, [m]))
+        idx = len(clusters) - 1
+        if m.message_id:
+            msg_to_cluster[m.message_id] = idx
+        return idx
 
     for seg in segments:
         for m in seg:
+            mtype = m.message_type or ""
+            raw_text = (m.text or "").strip()
+            msg_sec = _to_sec(m.create_time)
+
+            # 0) 显式回复链强并入: 被回复 / 回复链头 已在某簇 ⇒ 强同话题证据
+            chain_idx = _reply_chain_idx(m, msg_to_cluster)
+            if chain_idx is not None:
+                filler = not raw_text or _is_noise(raw_text)
+                clusters[chain_idx].add_node(m, filler=filler) if filler else clusters[chain_idx].add(m)
+                if m.message_id:
+                    msg_to_cluster[m.message_id] = chain_idx
+                continue
+
+            # 1) 非文本消息(图片/文件/视频) → 就近挂靠为证据节点(优先于噪声判定)
+            if _is_nontext(m):
+                recent = _most_recent(clusters)
+                if recent is not None and recent.reentry_ok(msg_sec, _FILLER_WINDOW_SEC):
+                    recent.add_node(m, filler=False)
+                    if m.message_id:
+                        msg_to_cluster[m.message_id] = clusters.index(recent)
+                else:
+                    # 无活跃簇可挂 → 自成一簇(保留这个话题的新起点证据)
+                    _new_cluster(Counter({f"[{mtype}]": 1}), m)
+                continue
+
+            # 2) 噪声回应节点(收到/好的/嗯/纯emoji等) → 就近挂靠为 filler
+            if _is_noise(raw_text):
+                recent = _most_recent(clusters)
+                if recent is not None and recent.reentry_ok(msg_sec, _FILLER_WINDOW_SEC):
+                    recent.add_node(m, filler=True)
+                    if m.message_id:
+                        msg_to_cluster[m.message_id] = clusters.index(recent)
+                # 时间上无归属的噪声 → 丢弃(没有簇可挂)
+                continue
+
+            # 3) 有主题内容的文本消息 → 正常内容聚类
             w = _weights([m])
             if not w:
-                continue  # 纯噪声/无文本 → 不参与主题
+                continue
             # L4 聚类: 找内容最相似的候选簇
             best_idx, best_score = -1, 0.0
             for i, c in enumerate(clusters):
                 s = _dice_counter(w, c.weights)
                 if s > best_score:
                     best_idx, best_score = i, s
-            msg_sec = _to_sec(m.create_time)
-            raw_len = len((m.text or "").strip())
+            raw_len = len(raw_text)
             recent = _most_recent(clusters)  # 最近活跃簇(用于时间就近接话)
 
             if best_idx >= 0 and best_score >= _DICE_HIGH:
                 # 强相似 → 并入(跨时间聚合, 交错返场话题归位)
                 clusters[best_idx].add(m)
+                msg_to_cluster[m.message_id] = best_idx
             elif best_idx >= 0 and best_score >= _DICE_LOW and llm is not None:
                 # 中等相似 + LLM 兜底判定同话题
                 same = _llm_same_topic(llm, _topic_from_weights(w), clusters[best_idx].topic)
                 if same:
                     clusters[best_idx].add(m)
+                    msg_to_cluster[m.message_id] = best_idx
                 else:
-                    clusters.append(_Cluster(w, [m]))
+                    _new_cluster(w, m)
             elif best_idx >= 0 and best_score >= _DICE_LOW:
                 # 中等相似(无 LLM): 仅当簇在回看窗口内仍活跃才并入, 否则保守新建
                 if clusters[best_idx].reentry_ok(msg_sec):
                     clusters[best_idx].add(m)
+                    msg_to_cluster[m.message_id] = best_idx
                 else:
-                    clusters.append(_Cluster(w, [m]))
-            elif recent is not None and raw_len <= _SHORT_REPLY_MAX_CHARS and _recently_active(recent, msg_sec):
+                    _new_cluster(w, m)
+            elif recent is not None and raw_len <= _SHORT_REPLY_MAX_CHARS and recent.reentry_ok(msg_sec, _REENTRY_WINDOW_SEC):
                 # 短回复 + 无内容相似但时间紧邻最近活跃簇 → 就近接话
                 # (处理"我遇到了/收到/试一下"这类不带关键词的接话)
                 recent.add(m)
+                msg_to_cluster[m.message_id] = clusters.index(recent)
             else:
                 # 明显无关 / 有内容但偏离所有已有话题 → 新建主题簇
                 # (允许与已有簇并存 = 时间上并排处理交错话题)
-                clusters.append(_Cluster(w, [m]))
+                _new_cluster(w, m)
 
     # L5b 可选: LLM 对每个簇给出更通顺的主题措辞(仅配 LLM 时)
     if llm is not None:
@@ -349,6 +451,19 @@ def cluster_chat(
             _rename_by_llm(llm, c)
 
     return [_to_dict(c) for c in clusters]
+
+
+def _reply_chain_idx(m, msg_to_cluster: dict[str, int]):
+    """显式回复链强并入: 若本消息正回复/回复链头已在某簇, 返回该簇下标; 否则 None。"""
+    target = (m.parent_message_id or "").strip()
+    root = (m.root_message_id or "").strip()
+    # 优先按被回复消息定位; 退而按回复链根定位(独立消息 root=自身, 会命中自身新簇, 无妨)
+    for key in (target, root):
+        if key:
+            idx = msg_to_cluster.get(key)
+            if idx is not None:
+                return idx
+    return None
 
 
 def _rename_by_llm(llm: LLMClient, c: _Cluster) -> None:
@@ -380,10 +495,6 @@ def _most_recent(clusters: list[_Cluster]) -> Optional[_Cluster]:
     return best
 
 
-def _recently_active(c: _Cluster, msg_sec: Optional[float], window: int = _REENTRY_WINDOW_SEC) -> bool:
-    return c.reentry_ok(msg_sec, window)
-
-
 def _llm_same_topic(llm: LLMClient, a: str, b: str) -> bool:
     """LLM 判断两个主题是否同一话题。"""
     try:
@@ -396,10 +507,14 @@ def _llm_same_topic(llm: LLMClient, a: str, b: str) -> bool:
 
 def _to_dict(c: _Cluster) -> dict:
     stats = finalize_stat(c.rows) if c.rows else {}
+    content_count = len(c.rows) - c.filler_count
     return {
         "topic": c.topic,
         "start_topic": c.start_topic,
         "message_count": len(c.rows),
+        "content_count": content_count,  # 有主题内容的消息数(含非文本证据)
+        "filler_count": c.filler_count,  # 其中噪声回应节点数
+        "evidence": c.evidence,          # 非文本证据文件列表
         "participants": sorted({m.sender_id for m in c.rows if m.sender_id}),
         "participant_count": stats.get("participant_count", 0),
         "start_ms": stats.get("start_ms", 0),
@@ -412,6 +527,7 @@ def _to_dict(c: _Cluster) -> dict:
                 "sender": m.sender_id or "",
                 "type": m.message_type or "",
                 "text": (m.text or "").strip()[:120],
+                "is_filler": bool(m.message_id and m.message_id in c._filler_ids),
             }
             for m in c.rows
         ],
@@ -452,12 +568,15 @@ def to_text(clusters: list[dict]) -> str:
     clusters = sorted(clusters, key=lambda c: -c["message_count"])
     lines = [f"===== 主题归类整理 ({len(clusters)} 个主题簇) ====="]
     for i, c in enumerate(clusters, 1):
-        lines.append(
-            f"\n[{i}] {c['topic']}  —  {c['message_count']}条/{c['participant_count']}人"
-            + (" (交叉)" if c["interleaved"] else "")
-        )
+        extra = f"{c['message_count']}条/{c['participant_count']}人"
+        if c.get("filler_count"):
+            extra += f" (回应{c['filler_count']})"
+        lines.append(f"\n[{i}] {c['topic']}  —  {extra}" + (" (交叉)" if c["interleaved"] else ""))
         if c.get("start_topic") and c["start_topic"] != c["topic"]:
             lines.append(f"    话题演化: {c['start_topic']} → {c['topic']}")
+        if c.get("evidence"):
+            fnames = [e.get("file_name") or e["type"] for e in c["evidence"]]
+            lines.append("    证据文件: " + " ｜ ".join(fnames[:5]))
         if c["repr"]:
             lines.append("    代表: " + " ｜ ".join(c["repr"]))
     return "\n".join(lines)

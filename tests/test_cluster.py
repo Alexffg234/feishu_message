@@ -27,7 +27,7 @@ _cid = "oc_cluster_test"
 _id_counter = [0]
 
 
-def _m(mid, sender, ts, text, mtype="text", chat_id=None):
+def _m(mid, sender, ts, text, mtype="text", chat_id=None, parent="", root="", raw=None):
     _id_counter[0] += 1
     return Message(
         id=_id_counter[0],
@@ -38,8 +38,9 @@ def _m(mid, sender, ts, text, mtype="text", chat_id=None):
         message_type=mtype,
         text=text,
         create_time=str(ts),
-        parent_message_id="",
-        root_message_id="",
+        parent_message_id=parent,
+        root_message_id=root,
+        raw=raw,
     )
 
 
@@ -103,11 +104,9 @@ def _interleaved_msgs():
     return rows
 
 
-def test_interleaved_topics_split():
-    rows = _interleaved_msgs()
-    # 直接调用聚类(注入消息源),不依赖 DB
+def _run(rows, chat_id):
+    """把消息注入内存 SQLite 并执行聚类,返回簇列表(供测试复用)。"""
     import app.services.cluster_service as cs
-    from app.dao.segment_repo import SegmentRepo
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from app.models import Base
@@ -120,8 +119,11 @@ def test_interleaved_topics_split():
         session.add(m)
     session.commit()
     cs.SessionLocal = sessionmaker(bind=engine)
+    return cluster_chat(chat_id)
 
-    clusters = cluster_chat(_cid)
+
+def test_interleaved_topics_split():
+    clusters = _run(_interleaved_msgs(), _cid)
     text = to_text(clusters)
     print(text)
     # 应拆出多个簇,且最大簇分属不同主题(投屏/会议/固件至少两类主题)
@@ -138,6 +140,59 @@ def test_interleaved_topics_split():
     print("interleaved split OK")
 
 
+def test_noise_filler_attached():
+    """现象A: 噪声回应节点(收到/好的)应收录进话题簇, 而非被丢弃。"""
+    rows = [
+        _m("n1", "u1", T0, "明天十点开会大家记得", chat_id="oc_filler"),
+        _m("n2", "u2", T0 + 20_000, "收到", chat_id="oc_filler"),
+        _m("n3", "u3", T0 + 40_000, "好的收到", chat_id="oc_filler"),
+        _m("n4", "u4", T0 + 60_000, "没问题", chat_id="oc_filler"),
+    ]
+    clusters = _run(rows, "oc_filler")
+    print(to_text(clusters))
+    assert len(clusters) == 1, f"噪声回应应收录到唯一话题簇,实际 {len(clusters)}簇"
+    c = clusters[0]
+    assert c["message_count"] == 4, f"应收录4条(1主题+3回应),实际 {c['message_count']}"
+    assert c["filler_count"] == 3, f"应标3条噪声回应,实际 {c['filler_count']}"
+    assert c["content_count"] == 1
+    filler_ids = {m["is_filler"] for m in c["messages"]}
+    assert filler_ids == {True, False}, "簇内消息应同时含 主题发言(False) 与 回应节点(True)"
+    print("noise filler attached OK")
+
+
+def test_reply_chain_strong_merge():
+    """现象C: 显式回复链(parent/root 已在某簇)即使内容不相似也强制并入同一话题。"""
+    rows = [
+        _m("r1", "u1", T0, "投影仪怎么连电脑", chat_id="oc_chain"),
+        _m("r2", "u2", T0 + 30_000, "应该用HDMI线吧", chat_id="oc_chain", parent="r1", root="r1"),
+        _m("r3", "u1", T0 + 60_000, "好的我先试试", chat_id="oc_chain", parent="r2", root="r1"),
+    ]
+    clusters = _run(rows, "oc_chain")
+    print(to_text(clusters))
+    # 内容上 r1 与 r2/r3 几无重叠, 但靠回复链强并入 → 应收拢为 1 簇
+    assert len(clusters) == 1, f"回复链应收拢为1簇,实际 {len(clusters)}簇"
+    assert clusters[0]["message_count"] == 3
+    print("reply chain strong merge OK")
+
+
+def test_nontext_evidence_attached():
+    """现象B: 图片/文件消息应收录为话题的证据, 而非孤立成碎片。"""
+    rows = [
+        _m("e1", "u1", T0, "投屏驱动发群里了", chat_id="oc_evid"),
+        _m("e2", "u1", T0 + 30_000, "", chat_id="oc_evid", mtype="file",
+           raw={"file_name": "投屏驱动.zip", "mime_type": "application/zip", "file_key": "k1"}),
+        _m("e3", "u2", T0 + 60_000, "收到我试试", chat_id="oc_evid"),
+    ]
+    clusters = _run(rows, "oc_evid")
+    print(to_text(clusters))
+    assert len(clusters) == 1, f"非文本证据应并入唯一话题簇,实际 {len(clusters)}簇"
+    c = clusters[0]
+    assert c["message_count"] == 3
+    assert c["evidence"] and c["evidence"][0]["file_name"] == "投屏驱动.zip", \
+        f"应收录文件证据,实际 {c['evidence']}"
+    print("nontext evidence attached OK")
+
+
 def test_short_reply_chaining():
     """不带关键词的短接话(如"收到/我遇到了")应就近并入最近活跃簇,而非另起一簇。"""
     rows = [
@@ -145,26 +200,25 @@ def test_short_reply_chaining():
         _m("s2", "u2", T0 + 30_000, "我这也遇到了", chat_id="oc_reply"),   # 短接话, 无共享关键词
         _m("s3", "u3", T0 + 60_000, "重启一下吧", chat_id="oc_reply"),
     ]
-    import app.services.cluster_service as cs
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.models import Base
-
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    for m in rows:
-        session.add(m)
-    session.commit()
-    cs.SessionLocal = sessionmaker(bind=engine)
-
-    clusters = cluster_chat("oc_reply")
+    clusters = _run(rows, "oc_reply")
     print(to_text(clusters))
     # 3 条都应收拢到 1 个主题簇
     assert len(clusters) == 1, f"短接话应收拢为1簇,实际 {len(clusters)}"
     assert clusters[0]["message_count"] == 3
     print("short reply chaining OK")
+
+
+if __name__ == "__main__":
+    test_clean_text()
+    test_is_noise()
+    test_featurize_shared_substring_should_low()
+    test_featurize_same_topic_should_high()
+    test_interleaved_topics_split()
+    test_noise_filler_attached()
+    test_reply_chain_strong_merge()
+    test_nontext_evidence_attached()
+    test_short_reply_chaining()
+    print("ALL CLUSTER TESTS PASSED")
 
 
 if __name__ == "__main__":

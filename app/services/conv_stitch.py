@@ -7,9 +7,14 @@
 不依赖标签锚点,幂等可重跑。
 
 窗口策略:按时间升序取相邻 _BATCH_SIZE 个会话送 LLM,窗口步进
-_BATCH_STEP(重叠 1 个,边界会话会被两个窗口共同判定),各窗口输出
-「应合并的序号集合」,映射回全局会话后用并查集做传递闭包——
-跨窗口的链式关联(c3,c4)+(c4,c5)→{c3,c4,c5} 也能合并。
+_BATCH_STEP(重叠 1 个,边界会话会被两个窗口共同判定),每个窗口输出
+「应合并的序号集合」,仅在该窗口内部解析合并对(不做跨窗传递闭包,
+避免 LLM 偶发误判经闭包链式放大成巨型过度合并)。
+
+安全护栏(LLM 误判防护):
+- 时间间隙:源会话开始 - 目标会话结束 > _MAX_GAP_MS(6 小时)不合并,
+  问题处理生命周期极少跨这么长;
+- 标签冲突:双方都有非空 topic 且不同时不合并(已有确定标签是强反证)。
 """
 from __future__ import annotations
 
@@ -31,6 +36,8 @@ _BATCH_SIZE = 5
 _BATCH_STEP = 4
 # 每会话代表消息条数上限(首条+末条+最长)
 _REPR_CHARS = 60
+# 时间间隙护栏:源会话开始 - 目标会话结束 超过该值不合并(问题生命周期极少跨这么长)
+_MAX_GAP_MS = 6 * 3600 * 1000
 
 _SYSTEM_PROMPT = (
     "你是群聊对话缝合判定器。以下是同一群内按时间顺序相邻的若干会话,每个会话给出"
@@ -85,20 +92,22 @@ def _parse_stitch_result(raw: str, n: int) -> set[int]:
     return out
 
 
-class _UnionFind:
-    def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
-
-    def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-
-    def union(self, a: int, b: int) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self.parent[rb] = ra
+def _pair_allowed(src: Conversation, tgt: Conversation, chat_id: str) -> bool:
+    """合并对护栏:时间间隙超限或双方 topic 冲突时拒绝。"""
+    gap_ms = src.started_at_ms - tgt.last_message_at_ms
+    if gap_ms > _MAX_GAP_MS:
+        logger.info(
+            "会话缝合跳过 %s: #%d -> #%d 时间间隙 %.1f 小时超过 %.0f 小时",
+            chat_id, src.id, tgt.id, gap_ms / 3600000, _MAX_GAP_MS / 3600000,
+        )
+        return False
+    if src.topic and tgt.topic and src.topic != tgt.topic:
+        logger.info(
+            "会话缝合跳过 %s: #%d -> #%d 主题冲突(%s vs %s)",
+            chat_id, src.id, tgt.id, src.topic, tgt.topic,
+        )
+        return False
+    return True
 
 
 def _list_conversations(session: Session, chat_id: str) -> list[tuple[Conversation, list[Message]]]:
@@ -130,6 +139,8 @@ def plan_stitches(
 ) -> list[tuple[int, int]]:
     """规划会话缝合并对,返回 [(源会话id, 目标会话id)],目标=同组最早会话。
 
+    每个窗口的合并集合独立解析(不做跨窗传递闭包,防链式放大过度合并),
+    每个 (源,目标) 对再过时间间隙/主题冲突护栏。
     只读不改库,供 dry-run 预览;llm 为空或会话不足 2 个时返回空。
     """
     if llm is None:
@@ -138,7 +149,8 @@ def plan_stitches(
     if len(convs) < 2:
         return []
 
-    uf = _UnionFind(len(convs))
+    claimed: set[int] = set()  # 本轮已并入他组的会话下标,防重复合并
+    pairs: list[tuple[int, int]] = []
     for start in range(0, len(convs), _BATCH_STEP):
         window = convs[start : start + _BATCH_SIZE]
         if len(window) < 2:
@@ -154,26 +166,24 @@ def plan_stitches(
             logger.warning("会话缝合 LLM 调用失败 %s 窗口@%d: %s", chat_id, start, e)
             continue
         idxs = _parse_stitch_result(raw, len(window))
-        if len(idxs) >= 2:
-            globals_ = [start + i - 1 for i in sorted(idxs)]
-            for g in globals_[1:]:
-                uf.union(globals_[0], g)
         logger.debug(
             "会话缝合 %s 窗口@%d 输出 %r -> 合并组 %s", chat_id, start, raw, sorted(idxs)
         )
-
-    comp: dict[int, list[int]] = {}
-    for i in range(len(convs)):
-        comp.setdefault(uf.find(i), []).append(i)
-
-    pairs: list[tuple[int, int]] = []
-    for members in comp.values():
-        if len(members) < 2:
+        if len(idxs) < 2:
             continue
-        members.sort()  # 按时间升序(下标序=时间序)
-        target = convs[members[0]][0]
-        for i in members[1:]:
-            pairs.append((convs[i][0].id, target.id))
+        members = [start + i - 1 for i in sorted(idxs)]  # 下标升序=时间升序
+        target = members[0]
+        if target in claimed:
+            continue
+        for g in members[1:]:
+            if g in claimed:
+                continue
+            src_c, tgt_c = convs[g][0], convs[target][0]
+            if not _pair_allowed(src_c, tgt_c, chat_id):
+                continue
+            pairs.append((src_c.id, tgt_c.id))
+            claimed.add(g)
+        claimed.add(target)
     return pairs
 
 

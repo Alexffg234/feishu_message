@@ -24,6 +24,7 @@ from lark_oapi.core.const import UTF_8
 from lark_oapi.core.model import RawRequest, RawResponse
 
 from app.api.summary_page import SUMMARY_PAGE_HTML
+from app.api.habits_page import HABITS_PAGE_HTML
 from app.core.config import get_settings
 from app.core.db import check_db_connection, get_session
 from app.dao.conversation_repo import ConversationRepo
@@ -32,6 +33,7 @@ from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
 from app.services.message_service import MessageService
 from app.services.summary_service import get_summary_service
 from app.services.user_name_service import fill_tree_sender_names
+from app.services.habits_service import analyze as analyze_habits
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,20 @@ def message_topics(
 def summary_page() -> HTMLResponse:
     """总结可视化页面(内建 HTML,浏览器直接访问)。"""
     return HTMLResponse(content=SUMMARY_PAGE_HTML)
+
+
+@router.get("/habits", response_class=HTMLResponse)
+def habits_page() -> HTMLResponse:
+    """对话习惯可视化页面(内建 HTML,浏览器直接访问)。"""
+    return HTMLResponse(content=HABITS_PAGE_HTML)
+
+
+@router.get("/api/habits")
+def api_habits(
+    chat_id: Optional[str] = None, limit: int = 2000, db: Session = Depends(get_session)
+) -> dict:
+    """对话习惯分析结构化 JSON(供 /habits 页面消费,只读)。"""
+    return analyze_habits(chat_id=chat_id, limit=min(limit, 10000))
 
 
 @router.get("/api/conversations")

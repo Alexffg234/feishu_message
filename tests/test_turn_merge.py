@@ -19,6 +19,10 @@ T0 = 1700000000000
 
 
 def _make_service():
+    from app.core.config import get_settings
+
+    # 固定窗口 30s,不受本地/服务器 .env 配置影响
+    get_settings().turn_merge_seconds = 30
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -104,11 +108,11 @@ def test_different_sender_no_merge():
 def test_disabled_no_merge():
     from app.core.config import get_settings
 
+    svc, session = _make_service()
     settings = get_settings()
     old = settings.turn_merge_seconds
     settings.turn_merge_seconds = 0
     try:
-        svc, session = _make_service()
         svc.save_message(_msg("d1", "u1", T0))
         svc.save_message(_msg("d2", "u1", T0 + 5_000))  # 合并禁用 → 各自成组
         assert len(_convs(session)) == 2

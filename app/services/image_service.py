@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
+import tempfile
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote
@@ -96,9 +98,9 @@ class ImageService:
         # 按文件名扩展名推断 MIME 类型,让七牛的 Content-Type 正确(否则默认
         # application/octet-stream,浏览器无法识别文件类型,表现为"打不开/损坏")。
         mime_type = _guess_mime(file_name)
-        ok, _err = self._upload_to_qiniu(key, data, mime_type=mime_type)
+        ok, err = self._upload_to_qiniu(key, data, mime_type=mime_type)
         if not ok:
-            logger.warning("上传资源到七牛失败 %s=%s", res_type, file_key)
+            logger.warning("上传资源到七牛失败 %s=%s: %s", res_type, file_key, err)
             return ""
 
         url = f"{settings.qiniu_domain.rstrip('/')}/{key}"
@@ -154,24 +156,82 @@ class ImageService:
             return None
 
     # ------------------------------------------------------------ 七牛上传
+    # 七牛 put_data(表单上传)上限 100MB,超过须改用分片/断点续传上传。
+    _CHUNK_THRESHOLD = 100 * 1024 * 1024
+    # 网络层失败(status=-1)等自动重试次数
+    _UPLOAD_RETRIES = 3
+
     def _upload_to_qiniu(
         self, key: str, data: bytes, mime_type: str = "application/octet-stream"
     ) -> tuple[bool, str]:
-        """把字节上传到七牛。返回 (是否成功, 出错信息)。"""
+        """把字节上传到七牛。返回 (是否成功, 出错信息)。
+
+        - 大文件(>100MB)先落临时文件再分片/断点续传上传,避免表单上传超限;
+        - 网络层失败自动重试,避免偶发抖动丢资源。
+        """
         try:
-            from qiniu import Auth, put_data
+            from qiniu import Auth
 
             settings = get_settings()
             auth = Auth(settings.qiniu_access_key, settings.qiniu_secret_key)
             token = auth.upload_token(settings.qiniu_bucket, key)
-            ret, info = put_data(token, key, data=data, mime_type=mime_type)
-            if info is not None and info.status_code == 200:
-                return True, ""
-            msg = _qiniu_info_message(info)
-            return False, msg
+
+            last_err = "unknown"
+            for attempt in range(1, self._UPLOAD_RETRIES + 1):
+                ok, last_err = self._do_upload(token, key, data, mime_type)
+                if ok:
+                    return True, ""
+                logger.warning(
+                    "七牛上传第 %d/%d 次失败 key=%s: %s",
+                    attempt, self._UPLOAD_RETRIES, key, last_err,
+                )
+            return False, last_err
         except Exception as e:  # noqa: BLE001
             logger.warning("七牛上传异常 key=%s: %s", key, e)
             return False, str(e)
+
+    def _do_upload(
+        self, token: str, key: str, data: bytes, mime_type: str
+    ) -> tuple[bool, str]:
+        """单次上传。返回 (是否成功, 出错信息)。"""
+        if len(data) <= self._CHUNK_THRESHOLD:
+            from qiniu import put_data
+
+            ret, info = put_data(token, key, data=data, mime_type=mime_type)
+        else:
+            ret, info = self._put_large(token, key, data, mime_type)
+        if info is not None and info.status_code == 200:
+            return True, ""
+        return False, _qiniu_info_message(info)
+
+    def _put_large(
+        self, token: str, key: str, data: bytes, mime_type: str
+    ) -> tuple:
+        """大文件断点续传上传:写临时文件后调 SDK 分片上传。返回 (ret, info)。
+
+        兼容新旧 qiniu SDK:7.x 提供 put_file/put_file_v2,旧版提供 put_chunked。
+        """
+        import qiniu as _qiniu
+
+        fd, tmp_path = tempfile.mkstemp(prefix="qiniu_", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            for name in ("put_file_v2", "put_file", "put_chunked"):
+                fn = getattr(_qiniu, name, None)
+                if fn is None:
+                    continue
+                try:
+                    return fn(token, key, tmp_path, mime_type=mime_type)
+                except TypeError:
+                    # 个别版本无 mime_type 参数
+                    return fn(token, key, tmp_path)
+            raise RuntimeError("qiniu SDK 无可用分片上传函数")
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------ 客户端
     def _get_client(self) -> lark.Client | None:

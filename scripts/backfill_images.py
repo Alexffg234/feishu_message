@@ -76,7 +76,9 @@ def _fill(m: Message, dry_run: bool) -> bool:
 
     if not filled:
         return False
-    m.raw = raw
+    # 必须赋新对象:raw 与 m.raw 是同一 dict 引用,原地改+回赋同一对象,
+    # SQLAlchemy 检测不到变更 → 不发 UPDATE(之前"已更新"实际未落库的根因)。
+    m.raw = dict(raw)
     return True
 
 

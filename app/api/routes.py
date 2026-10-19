@@ -17,6 +17,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
@@ -205,7 +206,9 @@ async def feishu_event(request: Request) -> Response:
         return JSONResponse({"msg": "dispatcher not ready"}, status_code=500)
     body = await request.body()
     req = _parse_req(request, body)
-    raw = dispatcher.do(req)
+    # dispatcher.do 内含同步阻塞操作(媒体资源下载、DB 写入),必须放到线程池,
+    # 否则会卡死事件循环 → gunicorn worker 超时被杀 → 事件流中断丢消息。
+    raw = await run_in_threadpool(dispatcher.do, req)
     return _parse_resp(raw)
 
 

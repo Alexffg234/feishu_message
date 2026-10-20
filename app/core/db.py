@@ -68,6 +68,7 @@ def init_db() -> None:
     _ensure_message_group_columns()
     _ensure_conversation_columns()
     _ensure_segment_columns()
+    _ensure_topic_summary_columns()
     logger.info("数据库表结构就绪: %s", get_settings().database_url)
 
 
@@ -151,6 +152,24 @@ def _ensure_segment_columns() -> None:
             )
         )
         logger.info("messages 表新增列 segment_id")
+
+
+def _ensure_topic_summary_columns() -> None:
+    """轻量迁移:为存量 topic_summaries 表补 media_refs 列(JSONText)。"""
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "topic_summaries" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("topic_summaries")}
+    if "media_refs" in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text("ALTER TABLE topic_summaries ADD COLUMN media_refs TEXT")
+        )
+        logger.info("topic_summaries 表新增列 media_refs")
 
 
 def check_db_connection() -> bool:

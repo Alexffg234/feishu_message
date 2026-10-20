@@ -75,6 +75,12 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .gen-meta{font-size:12px;color:var(--muted);margin-top:8px}
   .regen{padding:6px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;margin-top:6px}
   .regen:hover{border-color:var(--primary);color:var(--primary)}
+  .media-gallery{display:flex;gap:12px;flex-wrap:wrap}
+  .media-item{display:inline-flex;flex-direction:column;gap:2px;align-items:center}
+  .media-thumb{max-width:180px;max-height:140px;border-radius:8px;border:1px solid #e4e7eb;background:#000;cursor:zoom-in}
+  .media-cap{font-size:11px;color:var(--muted)}
+  .media-filelink{font-size:13px;color:var(--primary);max-width:200px;word-break:break-all;text-decoration:none}
+  .media-filelink:hover{text-decoration:underline}
   .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--border)}
   .tab{padding:8px 22px;border:none;background:none;font-size:15px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px}
   .tab:hover{color:var(--text)}
@@ -315,8 +321,21 @@ async function toggleTopic(i, forceOpen){
     html += '<div class="ai-block"><div class="k">问题是什么 <span class="'+statusCls+'">'+esc(d.status||'未知')+'</span></div>'
       + '<div class="v">'+esc(d.problem||'(无)')+'</div></div>'
       + '<div class="ai-block"><div class="k">如何排查</div><div class="v">'+esc(d.investigation||'(无)')+'</div></div>'
-      + '<div class="ai-block"><div class="k">如何解决</div><div class="v">'+esc(d.resolution||'(无)')+'</div></div>'
-      + '<div class="gen-meta">生成于 '+(d.generated_at ? new Date(d.generated_at).toLocaleString() : '-')+'</div>'
+      + '<div class="ai-block"><div class="k">如何解决</div><div class="v">'+esc(d.resolution||'(无)')+'</div></div>';
+    if(d.media && d.media.length){
+      html += '<div class="ai-block"><div class="k">对话中的图片/视频/文件(编号与上文引用一致)</div><div class="media-gallery">';
+      for(const mm of d.media){
+        if(mm.type === 'image'){
+          html += '<span class="media-item"><img class="media-thumb" src="'+esc(mm.url)+'" loading="lazy" alt="图#'+mm.idx+'" onclick="window.open(this.src)"><span class="media-cap">图#'+mm.idx+' · '+fmtMs(mm.at)+'</span></span>';
+        } else if(mm.type === 'media'){
+          html += '<span class="media-item"><video class="media-thumb" src="'+esc(mm.url)+'" controls preload="metadata"></video><span class="media-cap">视频#'+mm.idx+' · '+fmtMs(mm.at)+'</span></span>';
+        } else {
+          html += '<span class="media-item"><a class="media-filelink" href="'+esc(mm.url)+'" target="_blank" rel="noopener">文件#'+mm.idx+': '+(esc(mm.name)||'下载')+'</a></span>';
+        }
+      }
+      html += '</div></div>';
+    }
+    html += '<div class="gen-meta">生成于 '+(d.generated_at ? new Date(d.generated_at).toLocaleString() : '-')+'</div>'
       + '<button class="regen" onclick="regenerateTopic('+i+')">重新生成</button>';
     body.innerHTML = html;
   }catch(e){

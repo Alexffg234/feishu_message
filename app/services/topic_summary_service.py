@@ -47,7 +47,11 @@ _SYSTEM_PROMPT = (
     '  "investigation": "如何排查:给出具体、可执行的排查步骤,分点列出",\n'
     '  "resolution": "如何解决:给出解决方案或当前采用的处理办法,分点列出;若尚未解决,写当前进展与下一步计划",\n'
     '  "status": "从[已解决, 排查中, 待用户反馈, 未知]中选一个"\n'
-    "}"
+    "}\n"
+    "补充:对话中带编号的图#N / 视频#N / 文件(名称)#N 是用户发来的截图、录屏或日志等证据。\n"
+    "若某张图片/视频与排查或解决过程相关(如操作步骤截图、故障现场照片、日志截图),"
+    "必须在 investigation 或 resolution 的对应步骤里引用其编号,"
+    "例如:「第2步:检查遥控器红灯状态(见图#2)」;与排查无关的媒体不要引用。"
 )
 
 _STATUS_ENUM = {"已解决", "排查中", "待用户反馈", "未知"}
@@ -81,21 +85,32 @@ def _parse_llm_json(raw: str) -> dict | None:
     return data
 
 
-def _media_label(m: Message) -> str:
-    """非文本消息的占位描述(让 LLM 知道这里有过图片/视频等证据)。"""
+def _media_label(m: Message, media_refs: list[dict]) -> str:
+    """非文本消息的占位描述(让 LLM 知道这里有过图片/视频等证据)。
+
+    带可展示 URL 的媒体按出现顺序编号(图#1 / 视频#2 / 文件#3),
+    编号清单写入 media_refs 供前端渲染;无 URL(已过期)的不编号。
+    """
     mtype = m.message_type or ""
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    name = raw.get("file_name") or raw.get("name") or ""
     if mtype == "image":
-        return "(图片)"
-    if mtype == "media":
-        return "(视频)"
-    if mtype == "file":
-        fname = ""
-        if isinstance(m.raw, dict):
-            fname = m.raw.get("file_name") or m.raw.get("name") or ""
-        return f"(文件: {fname or '未知文件'})"
-    if mtype == "audio":
+        url, zh = raw.get("image_url") or "", "图"
+    elif mtype == "media":
+        url, zh = raw.get("file_url") or "", "视频"
+    elif mtype == "file":
+        url, zh = raw.get("file_url") or "", f"文件({name or '未知文件'})"
+    elif mtype == "audio":
         return "(语音)"
-    return f"({mtype or '非文本'})"
+    else:
+        return f"({mtype or '非文本'})"
+    if not url:
+        return f"({zh})"
+    idx = len(media_refs) + 1
+    media_refs.append(
+        {"idx": idx, "type": mtype, "url": url, "name": name, "at": m.create_time}
+    )
+    return f"({zh}#{idx})"
 
 
 class TopicSummaryService:
@@ -146,6 +161,7 @@ class TopicSummaryService:
             "status": row.status,
             "message_count": row.message_count,
             "max_message_id": row.max_message_id,
+            "media": row.media_refs or [],
             "generated_at": row.generated_at.isoformat() if row.generated_at else "",
             "stale": stale,
         }
@@ -169,8 +185,14 @@ class TopicSummaryService:
             out["enabled"] = self.enabled
             return out
 
-    def _build_context(self, session, chat_id: str, topic: str) -> str | None:
-        """把该 topic 下所有对话拼成 LLM 上下文;有效文本不足返回 None。"""
+    def _build_context(
+        self, session, chat_id: str, topic: str
+    ) -> tuple[str | None, list[dict]]:
+        """把该 topic 下所有对话拼成 LLM 上下文。
+
+        返回 (context, media_refs):有效文本不足时 context 为 None;
+        media_refs 为带可展示 URL 的媒体编号清单(图片/视频/文件)。
+        """
         convs = (
             session.execute(
                 select(Conversation)
@@ -184,6 +206,7 @@ class TopicSummaryService:
         if not convs:
             convs = [None]  # type: ignore[list-item]
 
+        media_refs: list[dict] = []
         sender_ids: set[str] = set()
         case_msgs: list[tuple[Conversation | None, list[Message]]] = []
         for conv in convs:
@@ -214,7 +237,7 @@ class TopicSummaryService:
                     sender_ids.add(m.sender_id)
             case_msgs.append((conv, list(msgs)))
         if not case_msgs:
-            return None
+            return None, []
 
         from app.services.user_name_service import get_user_name_service
 
@@ -239,12 +262,12 @@ class TopicSummaryService:
                     text_lines += 1
                 else:
                     lines.append(f"[{_fmt_ts(m.create_time)}] ({m.sender_id or '?'}): "
-                                 f"{_media_label(m)}")
+                                 f"{_media_label(m, media_refs)}")
             if text_lines >= _MAX_TEXT_LINES:
                 break
         if text_lines < _MIN_TEXT_LINES:
-            return None
-        return "\n".join(lines)
+            return None, []
+        return "\n".join(lines), media_refs
 
     def generate_topic(self, chat_id: str, topic: str, force: bool = False) -> dict | None:
         """为某主题生成(或取缓存)AI 分析。
@@ -270,7 +293,7 @@ class TopicSummaryService:
                 out["generated_now"] = False
                 return out
 
-            context = self._build_context(session, chat_id, topic)
+            context, media_refs = self._build_context(session, chat_id, topic)
             if context is None:
                 return None
 
@@ -303,6 +326,7 @@ class TopicSummaryService:
             row.resolution = str(data.get("resolution") or "").strip()
             row.status = status
             row.message_count, row.max_message_id = fp
+            row.media_refs = media_refs or None
             row.generated_at = datetime.now(timezone.utc)
             session.commit()
             out = self._row_to_dict(row)

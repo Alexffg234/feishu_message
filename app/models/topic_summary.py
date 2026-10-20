@@ -8,6 +8,7 @@ topic_summaries:每个 (chat_id, topic) 一条 AI 分析,由后台定时任务�
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -19,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.message import BigIntPK, Base, _utcnow
+from app.models.message import BigIntPK, Base, JSONText, _utcnow
 
 
 class TopicSummary(Base):
@@ -38,6 +39,10 @@ class TopicSummary(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # 该 topic 对话中带可展示 URL 的媒体(图片/视频/文件),按出现顺序编号:
+    # [{idx, type: image/media/file, url, name, at(毫秒时间戳字符串)}]
+    # LLM 文案里用「图#N / 视频#N」引用,前端据此渲染缩略图
+    media_refs: Mapped[Optional[list]] = mapped_column(JSONText, nullable=True, default=None)
 
     __table_args__ = (
         UniqueConstraint("chat_id", "topic", name="uq_topic_summary_chat_topic"),

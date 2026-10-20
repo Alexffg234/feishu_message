@@ -257,29 +257,44 @@ def test_run_round_idempotent():
     print("round idempotent OK")
 
 
-def test_media_and_file_labels_no_crash():
-    """含图片/视频/文件消息的 topic 上下文构建不崩(file_name 在 raw JSON 里)。"""
+def test_media_numbered_and_persisted():
+    """带 URL 的图片/视频/文件在上下文里编号,media_refs 落库供前端渲染。"""
     svc, session, Session = _setup()
-    svc.save_message(_msg("f1", "u1", T0, mtype="file", text=""))
+    svc.save_message(_msg("p1", "u1", T0, mtype="image", text=""))
+    svc.save_message(_msg("f1", "u1", T0 + 5_000, mtype="file", text=""))
     svc.save_message(_msg("f2", "u2", T0 + 10_000, mtype="media", text=""))
     svc.save_message(_msg("f3", "u3", T0 + 20_000, text="发个日志文件看看"))
     svc.save_message(_msg("f4", "u3", T0 + 30_000, text="还有录屏"))
     svc.save_message(_msg("f5", "u1", T0 + 40_000, text="文件收到了，我看看"))
     # 模拟 image_service 落盘后写入 raw 的形态
+    p1 = session.query(Message).filter(Message.message_id == "p1").one()
+    p1.raw = {"image_key": "v3-0071-img", "image_url": "https://cdn/img1.png"}
     m1 = session.query(Message).filter(Message.message_id == "f1").one()
-    m1.raw = {"file_key": "v3-0071-fxx", "file_name": "log_2026.txt", "file_url": "https://cdn/x"}
+    m1.raw = {"file_key": "v3-0071-fxx", "file_name": "log_2026.txt", "file_url": "https://cdn/log.txt"}
+    m2 = session.query(Message).filter(Message.message_id == "f2").one()
+    m2.raw = {"file_key": "v3-0071-vid", "file_name": "录屏.mp4", "file_url": "https://cdn/vid.mp4"}
     session.commit()
     # f4 可能被轮次合并进 f3 组(非根),set_topic 对其为 no-op,列出无害
-    for root in ("f1", "f2", "f3", "f4", "f5"):
+    for root in ("p1", "f1", "f2", "f3", "f4", "f5"):
         _set_topic(session, root, "日志")
     llm = FakeLLM()
     ts = _svc(Session, llm)
     out = ts.generate_topic(CHAT, "日志")
     assert out is not None, "含媒体消息的正常 topic 应能生成"
     ctx = llm.calls[0]
-    assert "(文件: log_2026.txt)" in ctx
-    assert "(视频)" in ctx
-    print("media labels OK")
+    # 按出现顺序编号:图#1(图片) 文件(log_2026.txt)#2 视频#3
+    assert "(图#1)" in ctx, ctx
+    assert "(文件(log_2026.txt)#2)" in ctx, ctx
+    assert "(视频#3)" in ctx, ctx
+    assert "(语音)" not in ctx
+    assert out["media"] == [
+        {"idx": 1, "type": "image", "url": "https://cdn/img1.png", "name": "", "at": str(T0)},
+        {"idx": 2, "type": "file", "url": "https://cdn/log.txt", "name": "log_2026.txt", "at": str(T0 + 5_000)},
+        {"idx": 3, "type": "media", "url": "https://cdn/vid.mp4", "name": "录屏.mp4", "at": str(T0 + 10_000)},
+    ], out["media"]
+    row = session.query(TopicSummary).one()
+    assert row.media_refs and row.media_refs[0]["url"] == "https://cdn/img1.png"
+    print("media numbered & persisted OK")
 
 
 def test_get_cached_missing_and_fresh():
@@ -354,7 +369,7 @@ if __name__ == "__main__":
     test_parse_failure_fallback()
     test_status_out_of_enum()
     test_insufficient_text_skip()
-    test_media_and_file_labels_no_crash()
+    test_media_numbered_and_persisted()
     test_run_round_lock_and_release()
     test_run_round_idempotent()
     test_get_cached_missing_and_fresh()

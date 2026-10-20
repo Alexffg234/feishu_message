@@ -295,6 +295,35 @@ async function loadStats(){
   }
 }
 
+// 渲染媒体画廊(图片/视频/文件缩略图,带 #N 编号,与文案引用一致)
+function mediaGalleryHtml(items){
+  if(!items || !items.length) return '';
+  let g = '<div class="media-gallery">';
+  for(const mm of items){
+    if(mm.type === 'image'){
+      g += '<span class="media-item"><img class="media-thumb" src="'+esc(mm.url)+'" loading="lazy" alt="图#'+mm.idx+'" onclick="window.open(this.src)"><span class="media-cap">图#'+mm.idx+'</span></span>';
+    } else if(mm.type === 'media'){
+      g += '<span class="media-item"><video class="media-thumb" src="'+esc(mm.url)+'" controls preload="metadata"></video><span class="media-cap">视频#'+mm.idx+'</span></span>';
+    } else {
+      g += '<span class="media-item"><a class="media-filelink" href="'+esc(mm.url)+'" target="_blank" rel="noopener">文件#'+mm.idx+': '+(esc(mm.name)||'下载')+'</a></span>';
+    }
+  }
+  return g + '</div>';
+}
+
+// 从文案里提取引用的 #N 编号,按出现顺序取出对应媒体
+function pickMediaByRef(text, media){
+  if(!text || !media || !media.length) return [];
+  const seen = [];
+  const re = /#(\d+)/g;
+  let m;
+  while((m = re.exec(text)) !== null){
+    const item = media.find(x => x.idx === Number(m[1]));
+    if(item && !seen.includes(item)) seen.push(item);
+  }
+  return seen;
+}
+
 const topicLoaded = {};
 
 async function toggleTopic(i, forceOpen){
@@ -320,21 +349,10 @@ async function toggleTopic(i, forceOpen){
     const statusCls = d.status==='已解决' ? 'status-badge status-done' : 'status-badge';
     html += '<div class="ai-block"><div class="k">问题是什么 <span class="'+statusCls+'">'+esc(d.status||'未知')+'</span></div>'
       + '<div class="v">'+esc(d.problem||'(无)')+'</div></div>'
-      + '<div class="ai-block"><div class="k">如何排查</div><div class="v">'+esc(d.investigation||'(无)')+'</div></div>'
-      + '<div class="ai-block"><div class="k">如何解决</div><div class="v">'+esc(d.resolution||'(无)')+'</div></div>';
-    if(d.media && d.media.length){
-      html += '<div class="ai-block"><div class="k">对话中的图片/视频/文件(编号与上文引用一致)</div><div class="media-gallery">';
-      for(const mm of d.media){
-        if(mm.type === 'image'){
-          html += '<span class="media-item"><img class="media-thumb" src="'+esc(mm.url)+'" loading="lazy" alt="图#'+mm.idx+'" onclick="window.open(this.src)"><span class="media-cap">图#'+mm.idx+' · '+fmtMs(mm.at)+'</span></span>';
-        } else if(mm.type === 'media'){
-          html += '<span class="media-item"><video class="media-thumb" src="'+esc(mm.url)+'" controls preload="metadata"></video><span class="media-cap">视频#'+mm.idx+' · '+fmtMs(mm.at)+'</span></span>';
-        } else {
-          html += '<span class="media-item"><a class="media-filelink" href="'+esc(mm.url)+'" target="_blank" rel="noopener">文件#'+mm.idx+': '+(esc(mm.name)||'下载')+'</a></span>';
-        }
-      }
-      html += '</div></div>';
-    }
+      + '<div class="ai-block"><div class="k">如何排查</div><div class="v">'+esc(d.investigation||'(无)')+'</div>'
+      + mediaGalleryHtml(pickMediaByRef(d.investigation, d.media)) + '</div>'
+      + '<div class="ai-block"><div class="k">如何解决</div><div class="v">'+esc(d.resolution||'(无)')+'</div>'
+      + mediaGalleryHtml(pickMediaByRef(d.resolution, d.media)) + '</div>';
     html += '<div class="gen-meta">生成于 '+(d.generated_at ? new Date(d.generated_at).toLocaleString() : '-')+'</div>'
       + '<button class="regen" onclick="regenerateTopic('+i+')">重新生成</button>';
     body.innerHTML = html;

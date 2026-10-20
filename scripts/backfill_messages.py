@@ -8,6 +8,8 @@
 用法(项目根目录下,用服务器 venv 运行):
     python scripts/backfill_messages.py --chat oc_xxx --start "2026-10-19 14:39:00" --end "2026-10-19 15:00:00"
     python scripts/backfill_messages.py --chat oc_xxx --start "..." --end "..." --dry-run
+    # 相对时间窗(供 systemd timer 周期自愈,幂等去重):
+    python scripts/backfill_messages.py --chat oc_xxx --window 15
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -157,16 +159,26 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     p = argparse.ArgumentParser(description="回补拉取漏采消息")
     p.add_argument("--chat", required=True, help="群 chat_id")
-    p.add_argument("--start", required=True, help='开始时间,如 "2026-10-19 14:39:00"')
-    p.add_argument("--end", required=True, help='结束时间,如 "2026-10-19 15:00:00"')
+    p.add_argument("--start", help='开始时间,如 "2026-10-19 14:39:00"(与 --window 二选一)')
+    p.add_argument("--end", help='结束时间,如 "2026-10-19 15:00:00"(与 --window 二选一)')
+    p.add_argument(
+        "--window",
+        type=int,
+        default=0,
+        help="相对时间窗(分钟):now-N ~ now,供定时器周期自愈;>0 时忽略 --start/--end",
+    )
     p.add_argument("--dry-run", action="store_true", help="只预览不落库")
     args = p.parse_args()
-    backfill(
-        args.chat,
-        datetime.strptime(args.start, "%Y-%m-%d %H:%M:%S"),
-        datetime.strptime(args.end, "%Y-%m-%d %H:%M:%S"),
-        args.dry_run,
-    )
+
+    if args.window > 0:
+        end = datetime.now()
+        start = end - timedelta(minutes=args.window)
+    elif args.start and args.end:
+        start = datetime.strptime(args.start, "%Y-%m-%d %H:%M:%S")
+        end = datetime.strptime(args.end, "%Y-%m-%d %H:%M:%S")
+    else:
+        p.error("需要 --window N(分钟) 或同时提供 --start 与 --end")
+    backfill(args.chat, start, end, args.dry_run)
 
 
 if __name__ == "__main__":

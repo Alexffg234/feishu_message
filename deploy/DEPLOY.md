@@ -104,6 +104,15 @@ curl http://127.0.0.1:8008/ready     # 期望数据库连通 OK
 journalctl -u feishu-message -f
 ```
 
+可选：启用「漏采周期回补」定时器（每 5 分钟自动补最近 15 分钟的漏采消息，幂等；
+`deploy/update.sh` 热更新时会自动安装，手工部署时需手动执行一次）：
+```bash
+cp /opt/feishu_group_message/deploy/feishu-backfill.service /opt/feishu_group_message/deploy/feishu-backfill.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now feishu-backfill.timer
+systemctl list-timers feishu-backfill.timer   # 应看到 NEXT 时间
+```
+
 ---
 
 ## 六、配置 Nginx（HTTP）

@@ -206,8 +206,10 @@ async def feishu_event(request: Request) -> Response:
         return JSONResponse({"msg": "dispatcher not ready"}, status_code=500)
     body = await request.body()
     req = _parse_req(request, body)
-    # dispatcher.do 内含同步阻塞操作(媒体资源下载、DB 写入),必须放到线程池,
-    # 否则会卡死事件循环 → gunicorn worker 超时被杀 → 事件流中断丢消息。
+    # dispatcher.do 做签名校验/解密(同步),回调本身只入队(先应答后处理),
+    # 正常路径毫秒级返回 200;媒体下载/DB 写入由后台消费者线程处理,
+    # 慢事件不再拖慢应答、不再触发 gunicorn worker 超时被杀。
+    # 队列满时回调降级同步处理,故仍需线程池兜底,避免卡死事件循环。
     raw = await run_in_threadpool(dispatcher.do, req)
     return _parse_resp(raw)
 

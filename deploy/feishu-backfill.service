@@ -1,0 +1,14 @@
+[Unit]
+Description=Feishu missed-message backfill (rolling 15min window, self-heal)
+After=network.target feishu-message.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/feishu_group_message
+# 相对时间窗:每次补最近 15 分钟,按 message_id 幂等去重,窗口重叠安全
+# 覆盖 worker 被杀/重启/DB 抖动/飞书重推过期导致的漏采
+ExecStart=/opt/feishu_group_message/.venv/bin/python scripts/backfill_messages.py \
+    --chat oc_f39eee707d10313ba6f49e4dcbde94f3 --window 15
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true

@@ -33,6 +33,10 @@ async def lifespan(app: FastAPI):
     setup_logging()
     settings = get_settings()
     app.state.dispatcher = _dispatcher()
+    # 事件队列消费者(先应答后处理,见 event_queue)
+    from app.services.feishu_handler import get_event_queue
+
+    get_event_queue().start()
     # 数据表就绪
     try:
         init_db()
@@ -42,7 +46,8 @@ async def lifespan(app: FastAPI):
     logger.info("服务启动完成 host=%s port=%s db=%s",
                 settings.host, settings.port, settings.database_url)
     yield
-    # 应用关闭(优雅)
+    # 应用关闭(优雅):排空事件队列,处理完在途事件再退出
+    get_event_queue().stop(drain=True)
     logger.info("服务已关闭")
 
 

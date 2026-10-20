@@ -9,6 +9,7 @@ from app.models.segment import MessageSegment  # noqa: F401
 from app.models.user_name import UserName  # noqa: F401
 from app.models.topic_summary import TopicSummary  # noqa: F401
 from app.models.topic_group import TopicGroup  # noqa: F401
+from app.models.topic_knowledge import TopicKnowledge  # noqa: F401
 from app.models.app_lock import SchedulerLock  # noqa: F401
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "UserName",
     "TopicSummary",
     "TopicGroup",
+    "TopicKnowledge",
     "SchedulerLock",
 ]

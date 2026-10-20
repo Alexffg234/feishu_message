@@ -449,6 +449,76 @@ def test_api_topic_groups_crud():
     print("api topic groups OK")
 
 
+def test_api_topic_knowledge_crud():
+    from fastapi import HTTPException
+
+    from app.api.routes import (
+        TopicKnowledgeIn,
+        api_topic_knowledge_delete,
+        api_topic_knowledge_get,
+        api_topic_knowledge_upsert,
+    )
+
+    svc, session, Session = _setup()
+    assert api_topic_knowledge_get(topic="投屏", db=session)["content"] == ""
+
+    out = api_topic_knowledge_upsert(
+        body=TopicKnowledgeIn(topic="投屏", content="标准自查流程:1. 查网段"),
+        db=session,
+    )
+    assert out["topic"] == "投屏" and out["length"] > 0
+    assert (
+        api_topic_knowledge_get(topic="投屏", db=session)["content"] == "标准自查流程:1. 查网段"
+    )
+
+    # 同名覆盖
+    api_topic_knowledge_upsert(
+        body=TopicKnowledgeIn(topic="投屏", content="新流程"), db=session
+    )
+    assert api_topic_knowledge_get(topic="投屏", db=session)["content"] == "新流程"
+
+    try:
+        api_topic_knowledge_upsert(
+            body=TopicKnowledgeIn(topic="  ", content="x"), db=session
+        )
+        raise AssertionError("应 400")
+    except HTTPException as e:
+        assert e.status_code == 400
+
+    api_topic_knowledge_delete(topic="投屏", db=session)
+    assert api_topic_knowledge_get(topic="投屏", db=session)["content"] == ""
+    try:
+        api_topic_knowledge_delete(topic="投屏", db=session)
+        raise AssertionError("应 404")
+    except HTTPException as e:
+        assert e.status_code == 404
+    print("api topic knowledge OK")
+
+
+def test_knowledge_in_context_and_stale():
+    """知识库拼进 LLM 上下文;知识库变化后缓存变 stale,重生成后刷新。"""
+    from app.models.topic_knowledge import TopicKnowledge
+
+    svc, session, Session = _setup()
+    _seed(svc, session)
+    llm = FakeLLM()
+    ts = _svc(Session, llm)
+    ts.generate_topic(CHAT, "音爆")
+    assert ts.get_cached(CHAT, "音爆")["stale"] is False
+
+    session.add(TopicKnowledge(topic="音爆", content="标准手册:检查音量设置"))
+    session.commit()
+    assert ts.get_cached(CHAT, "音爆")["stale"] is True
+
+    out = ts.generate_topic(CHAT, "音爆", force=True)
+    assert out is not None and out["generated_now"] is True
+    ctx = llm.calls[-1]
+    assert "参考知识库" in ctx, ctx
+    assert "标准手册:检查音量设置" in ctx, ctx
+    assert ts.get_cached(CHAT, "音爆")["stale"] is False
+    print("knowledge context & stale OK")
+
+
 if __name__ == "__main__":
     test_generate_topic_json_fields()
     test_fingerprint_fresh_cache_no_llm()

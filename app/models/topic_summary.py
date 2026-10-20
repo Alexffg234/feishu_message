@@ -36,6 +36,8 @@ class TopicSummary(Base):
     # 生成时的指纹:该 topic 的消息数与最大消息 id
     message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # 指纹第三元:参考知识库内容 crc32(无知识库为 0)。知识库更新后自动变 stale
+    knowledge_hash: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

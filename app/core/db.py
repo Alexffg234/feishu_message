@@ -155,7 +155,7 @@ def _ensure_segment_columns() -> None:
 
 
 def _ensure_topic_summary_columns() -> None:
-    """轻量迁移:为存量 topic_summaries 表补 media_refs 列(JSONText)。"""
+    """轻量迁移:为存量 topic_summaries 表补 media_refs / knowledge_hash 列。"""
     from sqlalchemy import inspect as sa_inspect
     from sqlalchemy import text as sql_text
 
@@ -163,13 +163,20 @@ def _ensure_topic_summary_columns() -> None:
     if "topic_summaries" not in inspector.get_table_names():
         return
     existing = {c["name"] for c in inspector.get_columns("topic_summaries")}
-    if "media_refs" in existing:
-        return
     with engine.begin() as conn:
-        conn.execute(
-            sql_text("ALTER TABLE topic_summaries ADD COLUMN media_refs TEXT")
-        )
-        logger.info("topic_summaries 表新增列 media_refs")
+        if "media_refs" not in existing:
+            conn.execute(
+                sql_text("ALTER TABLE topic_summaries ADD COLUMN media_refs TEXT")
+            )
+            logger.info("topic_summaries 表新增列 media_refs")
+        if "knowledge_hash" not in existing:
+            conn.execute(
+                sql_text(
+                    "ALTER TABLE topic_summaries ADD COLUMN knowledge_hash "
+                    "BIGINT NOT NULL DEFAULT 0"
+                )
+            )
+            logger.info("topic_summaries 表新增列 knowledge_hash")
 
 
 def check_db_connection() -> bool:

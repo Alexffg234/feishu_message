@@ -199,6 +199,14 @@ def api_topics(limit: int = 50, db: Session = Depends(get_session)) -> dict:
             if row.topic not in cache_by_topic:
                 cache_by_topic[row.topic] = row
 
+    from app.models.topic_knowledge import TopicKnowledge
+    from app.services.topic_summary_service import TopicSummaryService
+
+    khash_by_topic = {
+        r.topic: TopicSummaryService._knowledge_hash(r.content or "")
+        for r in db.query(TopicKnowledge).all()
+    }
+
     topics = []
     for r in msg_stats:
         t = r[0]
@@ -206,7 +214,11 @@ def api_topics(limit: int = 50, db: Session = Depends(get_session)) -> dict:
         row = cache_by_topic.get(t)
         if row is None:
             summary_status = "missing"
-        elif (row.message_count, int(row.max_message_id or 0)) == (int(r.msg_count), max_id):
+        elif (
+            row.message_count,
+            int(row.max_message_id or 0),
+            row.knowledge_hash or 0,
+        ) == (int(r.msg_count), max_id, khash_by_topic.get(t, 0)):
             summary_status = "ready"
         else:
             summary_status = "stale"
@@ -335,6 +347,59 @@ def api_topic_groups_delete(name: str, db: Session = Depends(get_session)) -> di
     db.delete(row)
     db.commit()
     return {"deleted": name}
+
+
+class TopicKnowledgeIn(BaseModel):
+    """主题参考知识库入参:同名 upsert,整体覆盖 content。"""
+
+    topic: str
+    content: str
+
+
+@router.get("/api/topic_knowledge")
+def api_topic_knowledge_get(topic: str, db: Session = Depends(get_session)) -> dict:
+    from app.models.topic_knowledge import TopicKnowledge
+
+    row = db.query(TopicKnowledge).filter(TopicKnowledge.topic == topic).first()
+    return {"topic": topic, "content": row.content if row else ""}
+
+
+@router.post("/api/topic_knowledge")
+def api_topic_knowledge_upsert(
+    body: TopicKnowledgeIn, db: Session = Depends(get_session)
+) -> dict:
+    """写入/覆盖某 topic 的参考知识库(标准排查手册)。"""
+    from datetime import datetime, timezone
+
+    from app.models.message import _utcnow
+    from app.models.topic_knowledge import TopicKnowledge
+
+    topic = (body.topic or "").strip()
+    content = (body.content or "").strip()
+    if not topic or not content:
+        raise HTTPException(status_code=400, detail="topic 与 content 不能为空")
+    row = db.query(TopicKnowledge).filter(TopicKnowledge.topic == topic).first()
+    if row is None:
+        row = TopicKnowledge(topic=topic, content=content, updated_at=_utcnow())
+        db.add(row)
+    else:
+        row.content = content
+        row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return {"topic": row.topic, "length": len(row.content or "")}
+
+
+@router.delete("/api/topic_knowledge/{topic}")
+def api_topic_knowledge_delete(topic: str, db: Session = Depends(get_session)) -> dict:
+    from app.models.topic_knowledge import TopicKnowledge
+
+    row = db.query(TopicKnowledge).filter(TopicKnowledge.topic == topic).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    db.delete(row)
+    db.commit()
+    return {"deleted": topic}
 
 
 @router.get("/habits", response_class=HTMLResponse)

@@ -14,6 +14,7 @@ import json
 import logging
 import threading
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -24,6 +25,7 @@ from app.core.db import SessionLocal
 from app.models.app_lock import SchedulerLock
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.models.topic_knowledge import TopicKnowledge
 from app.models.topic_summary import TopicSummary
 from app.services.llm import LLMClient, LLMError
 
@@ -58,7 +60,11 @@ _SYSTEM_PROMPT = (
     "resolution 中不要引用故障证据图(没有解决方案配图时,steps 里就不写图片引用);\n"
     "- 消息文本后若带「(本条富文本内嵌图片: 图#N ...)」,表示该富文本消息在文字后面内嵌了图片,"
     "这类图通常就是该回复给出的方案/步骤截图,相关时必须引用到 resolution 对应步骤;\n"
-    "- 与排查、解决均无关的媒体(如闲聊截图)不要引用。"
+    "- 与排查、解决均无关的媒体(如闲聊截图)不要引用。\n"
+    "参考知识库:上下文末尾若有「参考知识库」段,是该类问题的标准自查手册。"
+    "resolution 必须以知识库中与该问题对应的标准流程为主体(保持手册步骤顺序与措辞,"
+    "结合本案例实际情况取舍:不适用于本案例的步骤可删去,已实际执行过的步骤可标注结果);"
+    "不要自造知识库以外的操作步骤。investigation 可参考知识库中的排查要点。"
 )
 
 _STATUS_ENUM = {"已解决", "排查中", "待用户反馈", "未知"}
@@ -168,7 +174,21 @@ class TopicSummaryService:
         return self._llm is not None
 
     # ============================================================ 单主题生成
-    def _fingerprint(self, session, chat_id: str, topic: str) -> tuple[int, int] | None:
+    def _knowledge(self, session, topic: str) -> str:
+        """该 topic 的参考知识库文本(标准排查手册),无则 ''。"""
+        row = session.execute(
+            select(TopicKnowledge).where(TopicKnowledge.topic == topic)
+        ).scalar_one_or_none()
+        return (row.content or "").strip() if row else ""
+
+    @staticmethod
+    def _knowledge_hash(content: str) -> int:
+        return zlib.crc32(content.encode("utf-8")) & 0xFFFFFFFF if content else 0
+
+    def _fingerprint(
+        self, session, chat_id: str, topic: str
+    ) -> tuple[int, int, int] | None:
+        """指纹 = (消息数, 最大消息id, 知识库内容hash);任一变化即需重新生成。"""
         from sqlalchemy import func
 
         row = session.execute(
@@ -180,7 +200,9 @@ class TopicSummaryService:
         count, max_id = int(row[0] or 0), row[1]
         if count == 0:
             return None
-        return count, int(max_id or 0)
+        return count, int(max_id or 0), self._knowledge_hash(
+            self._knowledge(session, topic)
+        )
 
     def _row_to_dict(self, row: TopicSummary, stale: bool = False) -> dict:
         return {
@@ -210,7 +232,11 @@ class TopicSummaryService:
                 return {"chat_id": chat_id, "topic": topic, "found": False,
                         "enabled": self.enabled}
             fp = self._fingerprint(session, chat_id, topic)
-            stale = bool(fp and (row.message_count, row.max_message_id) != fp)
+            stale = bool(
+                fp
+                and (row.message_count, row.max_message_id, row.knowledge_hash or 0)
+                != fp
+            )
             out = self._row_to_dict(row, stale=stale)
             out["found"] = True
             out["enabled"] = self.enabled
@@ -302,6 +328,11 @@ class TopicSummaryService:
                 break
         if text_lines < _MIN_TEXT_LINES:
             return None, []
+        knowledge = self._knowledge(session, topic)
+        if knowledge:
+            lines.append("")
+            lines.append("--- 参考知识库(该类问题的标准排查/解决自查流程) ---")
+            lines.append(knowledge)
         return "\n".join(lines), media_refs
 
     def generate_topic(self, chat_id: str, topic: str, force: bool = False) -> dict | None:
@@ -323,7 +354,11 @@ class TopicSummaryService:
                     TopicSummary.topic == topic,
                 )
             ).scalar_one_or_none()
-            if row is not None and not force and (row.message_count, row.max_message_id) == fp:
+            if (
+                row is not None
+                and not force
+                and (row.message_count, row.max_message_id, row.knowledge_hash or 0) == fp
+            ):
                 out = self._row_to_dict(row)
                 out["generated_now"] = False
                 return out
@@ -360,7 +395,7 @@ class TopicSummaryService:
             row.investigation = str(data.get("investigation") or "").strip()
             row.resolution = str(data.get("resolution") or "").strip()
             row.status = status
-            row.message_count, row.max_message_id = fp
+            row.message_count, row.max_message_id, row.knowledge_hash = fp
             row.media_refs = media_refs or None
             row.generated_at = datetime.now(timezone.utc)
             session.commit()

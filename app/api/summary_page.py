@@ -80,7 +80,7 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>群聊总结</h1>
-  <div class="sub">问题分类统计 · 每类问题 AI 分析(问题/排查/解决) · 单对话查看 · 验证分类效果</div>
+  <div class="sub">问题分类统计 · 每类问题 AI 分析(问题/排查/解决)</div>
 
   <div class="card">
     <div class="summary-title">问题分类统计</div>
@@ -88,21 +88,27 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="bar">
-    <select id="convSelect" onchange="loadSummary(this.value)"></select>
-    <button class="refresh" onclick="reload()">刷新</button>
-    <span id="llmStatus" class="llm-status"></span>
+    <button class="refresh" id="convToggle" onclick="toggleConvSection()">群聊总结(单对话查看)</button>
   </div>
 
-  <div class="card">
-    <div id="topicBox" class="topic" style="display:none"></div>
-    <div class="summary-title">LLM 总结</div>
-    <div id="summaryBox" class="empty-note">加载中…</div>
-  </div>
+  <div id="convSection" style="display:none">
+    <div class="bar">
+      <select id="convSelect" onchange="loadSummary(this.value)"></select>
+      <button class="refresh" onclick="reload()">刷新</button>
+      <span id="llmStatus" class="llm-status"></span>
+    </div>
 
-  <div class="card">
-    <div class="summary-title">完整对话</div>
-    <div id="chatBox" class="empty-note">加载中…</div>
-    <div id="meta" class="meta"></div>
+    <div class="card">
+      <div id="topicBox" class="topic" style="display:none"></div>
+      <div class="summary-title">LLM 总结</div>
+      <div id="summaryBox" class="empty-note">加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="summary-title">完整对话</div>
+      <div id="chatBox" class="empty-note">加载中…</div>
+      <div id="meta" class="meta"></div>
+    </div>
   </div>
 </div>
 
@@ -328,8 +334,20 @@ async function regenerateTopic(i){
   }
 }
 
+let convsLoaded = false;
+
+function toggleConvSection(){
+  const sec = document.getElementById('convSection');
+  const willShow = sec.style.display === 'none';
+  sec.style.display = willShow ? 'block' : 'none';
+  if(willShow && !convsLoaded){
+    convsLoaded = true;
+    loadConversations();
+  }
+}
+
 function reload(){loadConversations();loadStats();}
-window.addEventListener('DOMContentLoaded', ()=>{ loadConversations(); loadStats(); });
+window.addEventListener('DOMContentLoaded', ()=>{ loadStats(); });
 </script>
 </body>
 </html>

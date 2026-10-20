@@ -10,6 +10,9 @@
 - GET /messages/topics  按 LLM 主题聚合的消息(主题→回复链组)
 - GET /summary           总结可视化页面(内建 HTML)
 - GET /api/summary/{conversation_id}  某对话的 LLM 总结 + 完整消息树(JSON)
+- GET /api/topics        问题分类统计(按 topic 标签聚合)
+- GET /api/topics/summary  某主题的 AI 分析(读缓存)
+- POST /api/topics/summary 强制重新生成某主题的 AI 分析
 """
 from __future__ import annotations
 
@@ -31,6 +34,8 @@ from app.core.db import check_db_connection, get_session
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
 from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
+from app.models.conversation import Conversation
+from app.models.message import Message
 from app.services.message_service import MessageService
 from app.services.summary_service import get_summary_service
 from app.services.user_name_service import fill_tree_sender_names
@@ -130,6 +135,148 @@ def message_topics(
 def summary_page() -> HTMLResponse:
     """总结可视化页面(内建 HTML,浏览器直接访问)。"""
     return HTMLResponse(content=SUMMARY_PAGE_HTML)
+
+
+@router.get("/api/topics")
+def api_topics(limit: int = 50, db: Session = Depends(get_session)) -> dict:
+    """问题分类统计(按 topic 标签聚合,供 /summary 页面顶部统计卡片)。
+
+    - 每个 topic:案例数/消息数/人数/首次出现/最近活跃/关联对话 id
+    - summary_status: ready(缓存新鲜)/ stale(有新消息待重生成)/ missing(未生成)
+    """
+    from sqlalchemy import func
+
+    from app.models.topic_summary import TopicSummary
+
+    limit = min(limit, 100)
+    msg_stats = (
+        db.query(
+            Message.topic,
+            func.count(Message.id).label("msg_count"),
+            func.count(func.distinct(Message.sender_id)).label("people"),
+            func.min(Message.create_time).label("first_at"),
+            func.max(Message.create_time).label("last_at"),
+            func.max(Message.id).label("max_id"),
+        )
+        .where(Message.topic != "")
+        .group_by(Message.topic)
+        .order_by(func.max(Message.id).desc())
+        .limit(limit)
+        .all()
+    )
+    topic_names = [r[0] for r in msg_stats]
+
+    conv_counts = {
+        r[0]: int(r[1])
+        for r in db.query(
+            Conversation.topic, func.count(Conversation.id)
+        )
+        .where(Conversation.topic != "")
+        .group_by(Conversation.topic)
+        .all()
+    }
+    ids_by_topic: dict[str, list[int]] = {}
+    if topic_names:
+        for cid, t in db.query(Conversation.id, Conversation.topic).where(
+            Conversation.topic.in_(topic_names)
+        ):
+            ids_by_topic.setdefault(t, []).append(cid)
+    for v in ids_by_topic.values():
+        v.sort()
+
+    cache_by_topic: dict[str, object] = {}
+    if topic_names:
+        for row in db.query(TopicSummary).where(TopicSummary.topic.in_(topic_names)).all():
+            if row.topic not in cache_by_topic:
+                cache_by_topic[row.topic] = row
+
+    topics = []
+    for r in msg_stats:
+        t = r[0]
+        max_id = int(r.max_id or 0)
+        row = cache_by_topic.get(t)
+        if row is None:
+            summary_status = "missing"
+        elif (row.message_count, int(row.max_message_id or 0)) == (int(r.msg_count), max_id):
+            summary_status = "ready"
+        else:
+            summary_status = "stale"
+        topics.append(
+            {
+                "topic": t,
+                "conversation_count": conv_counts.get(t, 0),
+                "message_count": int(r.msg_count),
+                "participant_count": int(r.people),
+                "first_at": r.first_at or "",
+                "last_at": r.last_at or "",
+                "conversation_ids": ids_by_topic.get(t, []),
+                "summary_status": summary_status,
+            }
+        )
+
+    return {
+        "overall": {
+            "topic_count": db.query(func.count(func.distinct(Message.topic)))
+            .where(Message.topic != "")
+            .scalar()
+            or 0,
+            "conversation_count": db.query(func.count(Conversation.id)).scalar() or 0,
+            "unclassified_conversations": db.query(func.count(Conversation.id))
+            .where(Conversation.topic == "")
+            .scalar()
+            or 0,
+            "message_count": db.query(func.count(Message.id)).scalar() or 0,
+        },
+        "topics": topics,
+    }
+
+
+@router.get("/api/topics/summary")
+def api_topic_summary(
+    topic: str, chat_id: Optional[str] = None, db: Session = Depends(get_session)
+) -> dict:
+    """某主题标签的 AI 分析(纯读缓存,秒回)。
+
+    - chat_id 省略时自动取该 topic 所属群
+    - 无缓存时 found=false(后台定时任务会补齐,或手动 POST 强制生成)
+    """
+    from sqlalchemy import select
+
+    from app.services.topic_summary_service import get_topic_summary_service
+
+    if not chat_id:
+        chat_id = db.execute(
+            select(Message.chat_id).where(Message.topic == topic).limit(1)
+        ).scalar_one_or_none()
+        if chat_id is None:
+            raise HTTPException(status_code=404, detail="主题不存在")
+    return get_topic_summary_service().get_cached(chat_id, topic)
+
+
+@router.post("/api/topics/summary")
+async def api_topic_summary_regenerate(
+    topic: str,
+    chat_id: Optional[str] = None,
+    db: Session = Depends(get_session),
+) -> dict:
+    """强制重新生成某主题的 AI 分析(同步,约 5~15 秒)。"""
+    from sqlalchemy import select
+
+    from app.services.topic_summary_service import get_topic_summary_service
+
+    svc = get_topic_summary_service()
+    if not svc.enabled:
+        raise HTTPException(status_code=503, detail="LLM 未配置,无法生成")
+    if not chat_id:
+        chat_id = db.execute(
+            select(Message.chat_id).where(Message.topic == topic).limit(1)
+        ).scalar_one_or_none()
+        if chat_id is None:
+            raise HTTPException(status_code=404, detail="主题不存在")
+    result = await run_in_threadpool(svc.generate_topic, chat_id, topic, True)
+    if result is None:
+        raise HTTPException(status_code=409, detail="消息内容不足或生成失败")
+    return result
 
 
 @router.get("/habits", response_class=HTMLResponse)

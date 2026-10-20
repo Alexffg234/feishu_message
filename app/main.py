@@ -43,10 +43,15 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         # 数据库不可用时不清零服务,交由 /ready 与日志暴露
         logger.exception("init_db 失败(数据库可能未就绪)")
+    # 主题 AI 总结后台调度(建表后再启,租约锁表依赖 create_all)
+    from app.services.topic_summary_service import get_topic_summary_service
+
+    get_topic_summary_service().start()
     logger.info("服务启动完成 host=%s port=%s db=%s",
                 settings.host, settings.port, settings.database_url)
     yield
-    # 应用关闭(优雅):排空事件队列,处理完在途事件再退出
+    # 应用关闭(优雅):停后台调度 + 排空事件队列,处理完在途事件再退出
+    get_topic_summary_service().stop()
     get_event_queue().stop(drain=True)
     logger.info("服务已关闭")
 

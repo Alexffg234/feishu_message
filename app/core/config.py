@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # False = 只打标签不归并。
     topic_merge_enabled: bool = True
 
+    # ---------- 主题 AI 总结(后台定时全量预生成) ----------
+    # 每 N 分钟扫一遍全部 topic,指纹(消息数/最大消息 id)变化的重新生成 AI 分析。
+    # 0 = 禁用后台定时(仅手动 POST 触发)。
+    topic_summary_interval_minutes: int = 10
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)

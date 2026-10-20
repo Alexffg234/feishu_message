@@ -54,12 +54,38 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .indent-4{margin-left:96px;border-left-color:#d4537e}
   .meta{font-size:12px;color:var(--muted);margin-top:12px}
   .loading{color:var(--muted);font-size:14px;padding:20px 0}
+  .stats-overall{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .stat-chip{background:#fafbfc;border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:13px;color:var(--muted);min-width:88px}
+  .stat-chip b{color:var(--text);font-size:18px;display:block;line-height:1.3}
+  .topic-row{border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
+  .topic-head{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:#fff;flex-wrap:wrap}
+  .topic-head:hover{background:#f8fafc}
+  .topic-name{font-weight:600;font-size:14px}
+  .topic-stat{font-size:12px;color:var(--muted)}
+  .ai-badge{font-size:12px;padding:2px 10px;border-radius:20px;margin-left:auto}
+  .ai-ready{background:#e1f5ee;color:#085041}
+  .ai-stale{background:#fdf3e0;color:#7a4d05}
+  .ai-missing{background:#eceef1;color:#6b7280}
+  .topic-body{padding:12px 14px;border-top:1px solid var(--border);background:#fafbfc}
+  .ai-block{margin-bottom:10px}
+  .ai-block .k{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:2px}
+  .ai-block .v{font-size:14px;white-space:pre-wrap;word-break:break-word}
+  .status-badge{font-size:12px;padding:2px 10px;border-radius:20px;background:#fdf3e0;color:#7a4d05;margin-left:6px}
+  .status-done{background:#e1f5ee;color:#085041}
+  .gen-meta{font-size:12px;color:var(--muted);margin-top:8px}
+  .regen{padding:6px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;margin-top:6px}
+  .regen:hover{border-color:var(--primary);color:var(--primary)}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>群聊总结</h1>
-  <div class="sub">查看一次完整对话 · 主题标签 · LLM 总结 · 验证分类效果</div>
+  <div class="sub">问题分类统计 · 每类问题 AI 分析(问题/排查/解决) · 单对话查看 · 验证分类效果</div>
+
+  <div class="card">
+    <div class="summary-title">问题分类统计</div>
+    <div id="statsBox" class="empty-note">加载中…</div>
+  </div>
 
   <div class="bar">
     <select id="convSelect" onchange="loadSummary(this.value)"></select>
@@ -195,8 +221,115 @@ function renderTree(nodes, depth){
   return html;
 }
 
-function reload(){loadConversations();}
-window.addEventListener('DOMContentLoaded', loadConversations);
+let topicsData = [];
+
+function fmtMs(v){
+  if(!v) return '';
+  const d = new Date(Number(v));
+  const p = n => String(n).padStart(2,'0');
+  return (d.getMonth()+1)+'-'+d.getDate()+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+
+async function loadStats(){
+  const box = document.getElementById('statsBox');
+  box.className = 'empty-note';
+  try{
+    const r = await fetch('/api/topics?limit=50');
+    const d = await r.json();
+    topicsData = d.topics || [];
+    const o = d.overall || {};
+    let html = '<div class="stats-overall">'
+      + '<div class="stat-chip"><b>'+(o.topic_count||0)+'</b>问题类别</div>'
+      + '<div class="stat-chip"><b>'+(o.conversation_count||0)+'</b>对话(案例)</div>'
+      + '<div class="stat-chip"><b>'+(o.message_count||0)+'</b>消息总数</div>'
+      + '<div class="stat-chip"><b>'+(o.unclassified_conversations||0)+'</b>未分类对话</div>'
+      + '</div>';
+    if(!topicsData.length){
+      html += '<div class="empty-note">暂无已分类的问题(消息入库并完成主题分类后出现)</div>';
+    }
+    topicsData.forEach((t,i)=>{
+      const badge = t.summary_status==='ready'
+        ? '<span class="ai-badge ai-ready">AI 已生成</span>'
+        : t.summary_status==='stale'
+        ? '<span class="ai-badge ai-stale">AI 待更新</span>'
+        : '<span class="ai-badge ai-missing">AI 未生成</span>';
+      html += '<div class="topic-row">'
+        + '<div class="topic-head" onclick="toggleTopic('+i+')">'
+        + '<span class="topic-name">'+esc(t.topic)+'</span>'
+        + '<span class="topic-stat">'+t.conversation_count+' 案例</span>'
+        + '<span class="topic-stat">'+t.message_count+' 条消息</span>'
+        + '<span class="topic-stat">'+t.participant_count+' 人</span>'
+        + '<span class="topic-stat">最近活跃 '+fmtMs(t.last_at)+'</span>'
+        + badge
+        + '</div>'
+        + '<div class="topic-body" id="topicBody'+i+'" style="display:none"></div>'
+        + '</div>';
+    });
+    box.innerHTML = html;
+    box.className = '';
+    if(topicsData.length) toggleTopic(0, true);
+  }catch(e){
+    box.textContent = '统计加载失败: ' + e;
+  }
+}
+
+const topicLoaded = {};
+
+async function toggleTopic(i, forceOpen){
+  const body = document.getElementById('topicBody'+i);
+  if(!body || !topicsData[i]) return;
+  const willShow = body.style.display==='none' || forceOpen;
+  body.style.display = willShow ? 'block' : 'none';
+  if(!willShow || topicLoaded[i]) return;
+  const t = topicsData[i];
+  body.innerHTML = '<span class="empty-note">AI 分析加载中…</span>';
+  try{
+    const r = await fetch('/api/topics/summary?topic='+encodeURIComponent(t.topic));
+    const d = await r.json();
+    if(!r.ok){ body.innerHTML = '<span class="empty-note">'+(d.detail||'加载失败')+'</span>'; return; }
+    topicLoaded[i] = true;
+    if(!d.found){
+      body.innerHTML = '<span class="empty-note">AI 分析尚未生成(后台定时任务会自动补齐,稍后刷新本页)</span>'
+        + '<br><button class="regen" onclick="regenerateTopic('+i+')">立即生成</button>';
+      return;
+    }
+    let html = '';
+    if(d.stale) html += '<div class="gen-meta">该问题有新消息,AI 分析待后台自动更新(也可手动重新生成)</div>';
+    const statusCls = d.status==='已解决' ? 'status-badge status-done' : 'status-badge';
+    html += '<div class="ai-block"><div class="k">问题是什么 <span class="'+statusCls+'">'+esc(d.status||'未知')+'</span></div>'
+      + '<div class="v">'+esc(d.problem||'(无)')+'</div></div>'
+      + '<div class="ai-block"><div class="k">如何排查</div><div class="v">'+esc(d.investigation||'(无)')+'</div></div>'
+      + '<div class="ai-block"><div class="k">如何解决</div><div class="v">'+esc(d.resolution||'(无)')+'</div></div>'
+      + '<div class="gen-meta">生成于 '+(d.generated_at ? new Date(d.generated_at).toLocaleString() : '-')+'</div>'
+      + '<button class="regen" onclick="regenerateTopic('+i+')">重新生成</button>';
+    body.innerHTML = html;
+  }catch(e){
+    body.innerHTML = '<span class="empty-note">加载失败: '+e+'</span>';
+  }
+}
+
+async function regenerateTopic(i){
+  const t = topicsData[i];
+  const body = document.getElementById('topicBody'+i);
+  if(!t || !body) return;
+  body.innerHTML = '<span class="empty-note">AI 重新生成中(约 5~15 秒)…</span>';
+  try{
+    const r = await fetch('/api/topics/summary?topic='+encodeURIComponent(t.topic), {method:'POST'});
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      body.innerHTML = '<span class="empty-note">生成失败: '+(d.detail||r.status)+'</span>';
+      return;
+    }
+    topicLoaded[i] = false;
+    await toggleTopic(i, true);
+    loadStats();
+  }catch(e){
+    body.innerHTML = '<span class="empty-note">生成失败: '+e+'</span>';
+  }
+}
+
+function reload(){loadConversations();loadStats();}
+window.addEventListener('DOMContentLoaded', ()=>{ loadConversations(); loadStats(); });
 </script>
 </body>
 </html>

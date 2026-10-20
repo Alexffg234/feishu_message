@@ -75,26 +75,26 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .gen-meta{font-size:12px;color:var(--muted);margin-top:8px}
   .regen{padding:6px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;margin-top:6px}
   .regen:hover{border-color:var(--primary);color:var(--primary)}
+  .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--border)}
+  .tab{padding:8px 22px;border:none;background:none;font-size:15px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px}
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>群聊总结</h1>
-  <div class="sub">点击「群聊总结」按钮查看:问题分类统计 · 每类问题 AI 分析(问题/排查/解决) · 单对话查看</div>
+  <h1>飞书群消息</h1>
+  <div class="sub">对话查看 · 群聊总结(问题分类统计 + 每类问题 AI 分析)</div>
 
-  <div class="bar">
-    <button class="refresh" onclick="toggleSummaryAll()">群聊总结</button>
+  <div class="tabs">
+    <button class="tab active" id="tabBtn1" onclick="switchTab(1)">对话查看</button>
+    <button class="tab" id="tabBtn2" onclick="switchTab(2)">群聊总结</button>
   </div>
 
-  <div id="summaryAll" style="display:none">
-    <div class="card">
-      <div class="summary-title">问题分类统计</div>
-      <div id="statsBox" class="empty-note">加载中…</div>
-    </div>
-
+  <div id="tab1">
     <div class="bar">
       <select id="convSelect" onchange="loadSummary(this.value)"></select>
-      <button class="refresh" onclick="reload()">刷新</button>
+      <button class="refresh" onclick="loadConversations()">刷新</button>
       <span id="llmStatus" class="llm-status"></span>
     </div>
 
@@ -108,6 +108,16 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
       <div class="summary-title">完整对话</div>
       <div id="chatBox" class="empty-note">加载中…</div>
       <div id="meta" class="meta"></div>
+    </div>
+  </div>
+
+  <div id="tab2" style="display:none">
+    <div class="card">
+      <div class="summary-title" style="display:flex;align-items:center;gap:12px">
+        问题分类统计
+        <button class="regen" style="margin-top:0" onclick="loadStats()">刷新</button>
+      </div>
+      <div id="statsBox" class="empty-note">加载中…</div>
     </div>
   </div>
 </div>
@@ -334,20 +344,20 @@ async function regenerateTopic(i){
   }
 }
 
-let summaryAllLoaded = false;
+let statsLoaded = false;
 
-function toggleSummaryAll(){
-  const sec = document.getElementById('summaryAll');
-  const willShow = sec.style.display === 'none';
-  sec.style.display = willShow ? 'block' : 'none';
-  if(willShow && !summaryAllLoaded){
-    summaryAllLoaded = true;
-    loadConversations();
+function switchTab(n){
+  document.getElementById('tab1').style.display = n === 1 ? 'block' : 'none';
+  document.getElementById('tab2').style.display = n === 2 ? 'block' : 'none';
+  document.getElementById('tabBtn1').className = 'tab' + (n === 1 ? ' active' : '');
+  document.getElementById('tabBtn2').className = 'tab' + (n === 2 ? ' active' : '');
+  if(n === 2 && !statsLoaded){
+    statsLoaded = true;
     loadStats();
   }
 }
 
-function reload(){loadConversations();loadStats();}
+window.addEventListener('DOMContentLoaded', loadConversations);
 </script>
 </body>
 </html>

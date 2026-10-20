@@ -89,7 +89,10 @@ def _media_label(m: Message) -> str:
     if mtype == "media":
         return "(视频)"
     if mtype == "file":
-        return f"(文件: {m.file_name or '未知文件'})"
+        fname = ""
+        if isinstance(m.raw, dict):
+            fname = m.raw.get("file_name") or m.raw.get("name") or ""
+        return f"(文件: {fname or '未知文件'})"
     if mtype == "audio":
         return "(语音)"
     return f"({mtype or '非文本'})"

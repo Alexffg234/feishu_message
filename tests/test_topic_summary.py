@@ -18,7 +18,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.models import Base, SchedulerLock
+from app.models import Base, Message, SchedulerLock
 from app.models.topic_summary import TopicSummary
 from app.schemas.message import MessageCreate
 from app.services.message_service import MessageService
@@ -257,6 +257,31 @@ def test_run_round_idempotent():
     print("round idempotent OK")
 
 
+def test_media_and_file_labels_no_crash():
+    """含图片/视频/文件消息的 topic 上下文构建不崩(file_name 在 raw JSON 里)。"""
+    svc, session, Session = _setup()
+    svc.save_message(_msg("f1", "u1", T0, mtype="file", text=""))
+    svc.save_message(_msg("f2", "u2", T0 + 10_000, mtype="media", text=""))
+    svc.save_message(_msg("f3", "u3", T0 + 20_000, text="发个日志文件看看"))
+    svc.save_message(_msg("f4", "u3", T0 + 30_000, text="还有录屏"))
+    svc.save_message(_msg("f5", "u1", T0 + 40_000, text="文件收到了，我看看"))
+    # 模拟 image_service 落盘后写入 raw 的形态
+    m1 = session.query(Message).filter(Message.message_id == "f1").one()
+    m1.raw = {"file_key": "v3-0071-fxx", "file_name": "log_2026.txt", "file_url": "https://cdn/x"}
+    session.commit()
+    # f4 可能被轮次合并进 f3 组(非根),set_topic 对其为 no-op,列出无害
+    for root in ("f1", "f2", "f3", "f4", "f5"):
+        _set_topic(session, root, "日志")
+    llm = FakeLLM()
+    ts = _svc(Session, llm)
+    out = ts.generate_topic(CHAT, "日志")
+    assert out is not None, "含媒体消息的正常 topic 应能生成"
+    ctx = llm.calls[0]
+    assert "(文件: log_2026.txt)" in ctx
+    assert "(视频)" in ctx
+    print("media labels OK")
+
+
 def test_get_cached_missing_and_fresh():
     svc, session, Session = _setup()
     _seed(svc, session)
@@ -329,6 +354,7 @@ if __name__ == "__main__":
     test_parse_failure_fallback()
     test_status_out_of_enum()
     test_insufficient_text_skip()
+    test_media_and_file_labels_no_crash()
     test_run_round_lock_and_release()
     test_run_round_idempotent()
     test_get_cached_missing_and_fresh()

@@ -403,6 +403,52 @@ def test_api_topic_summary_read_and_force(monkeypatch):
     print("api summary read/force OK")
 
 
+def test_api_topic_groups_crud():
+    from fastapi import HTTPException
+
+    from app.api.routes import (
+        TopicGroupIn,
+        api_topic_groups_delete,
+        api_topic_groups_list,
+        api_topic_groups_upsert,
+    )
+
+    svc, session, Session = _setup()
+    assert api_topic_groups_list(db=session)["groups"] == []
+
+    out = api_topic_groups_upsert(
+        body=TopicGroupIn(name="投屏问题", topics=["投屏找不到设备", "镜像投屏卡顿"]),
+        db=session,
+    )
+    assert out["name"] == "投屏问题"
+    assert out["topics"] == ["投屏找不到设备", "镜像投屏卡顿"]
+
+    # 同名 upsert:topics 整体覆盖
+    out = api_topic_groups_upsert(
+        body=TopicGroupIn(name="投屏问题", topics=["投屏卡顿"]), db=session
+    )
+    assert out["topics"] == ["投屏卡顿"]
+
+    lst = api_topic_groups_list(db=session)["groups"]
+    assert len(lst) == 1 and lst[0]["name"] == "投屏问题"
+
+    # 空 name / topics 400
+    try:
+        api_topic_groups_upsert(body=TopicGroupIn(name="  ", topics=[]), db=session)
+        raise AssertionError("应 400")
+    except HTTPException as e:
+        assert e.status_code == 400
+
+    api_topic_groups_delete(name="投屏问题", db=session)
+    assert api_topic_groups_list(db=session)["groups"] == []
+    try:
+        api_topic_groups_delete(name="投屏问题", db=session)
+        raise AssertionError("应 404")
+    except HTTPException as e:
+        assert e.status_code == 404
+    print("api topic groups OK")
+
+
 if __name__ == "__main__":
     test_generate_topic_json_fields()
     test_fingerprint_fresh_cache_no_llm()

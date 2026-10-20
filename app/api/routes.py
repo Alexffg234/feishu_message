@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from lark_oapi.core.const import UTF_8
@@ -42,6 +43,14 @@ from app.services.user_name_service import fill_tree_sender_names
 from app.services.habits_service import analyze as analyze_habits
 
 logger = logging.getLogger(__name__)
+
+
+class TopicGroupIn(BaseModel):
+    """问题大类(主题分组)入参:同名 upsert,topics 整体覆盖。"""
+
+    name: str
+    topics: list[str]
+
 
 # dispatcher 在应用工厂中注入
 dispatcher = None  # 由 create_app 设置
@@ -277,6 +286,55 @@ async def api_topic_summary_regenerate(
     if result is None:
         raise HTTPException(status_code=409, detail="消息内容不足或生成失败")
     return result
+
+
+@router.get("/api/topic_groups")
+def api_topic_groups_list(db: Session = Depends(get_session)) -> dict:
+    """问题大类列表(主题分组,前端按大类折叠展示小类)。"""
+    from app.models.topic_group import TopicGroup
+
+    rows = db.query(TopicGroup).order_by(TopicGroup.sort_order, TopicGroup.id).all()
+    return {
+        "groups": [
+            {"name": r.name, "topics": r.topics or [], "sort_order": r.sort_order}
+            for r in rows
+        ]
+    }
+
+
+@router.post("/api/topic_groups")
+def api_topic_groups_upsert(body: TopicGroupIn, db: Session = Depends(get_session)) -> dict:
+    """创建/更新问题大类(name 唯一,topics 整体覆盖)。"""
+    from app.models.topic_group import TopicGroup
+
+    name = (body.name or "").strip()
+    topics = [t.strip() for t in body.topics if (t or "").strip()]
+    if not name or not topics:
+        raise HTTPException(status_code=400, detail="name 与 topics 不能为空")
+    row = db.query(TopicGroup).filter(TopicGroup.name == name).first()
+    if row is None:
+        from sqlalchemy import func
+
+        max_order = db.query(func.max(TopicGroup.sort_order)).scalar() or 0
+        row = TopicGroup(name=name, topics=topics, sort_order=int(max_order) + 1)
+        db.add(row)
+    else:
+        row.topics = topics
+    db.commit()
+    db.refresh(row)
+    return {"name": row.name, "topics": row.topics or []}
+
+
+@router.delete("/api/topic_groups/{name}")
+def api_topic_groups_delete(name: str, db: Session = Depends(get_session)) -> dict:
+    from app.models.topic_group import TopicGroup
+
+    row = db.query(TopicGroup).filter(TopicGroup.name == name).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="大类不存在")
+    db.delete(row)
+    db.commit()
+    return {"deleted": name}
 
 
 @router.get("/habits", response_class=HTMLResponse)

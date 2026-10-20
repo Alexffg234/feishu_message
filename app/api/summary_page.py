@@ -81,6 +81,12 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .media-cap{font-size:11px;color:var(--muted)}
   .media-filelink{font-size:13px;color:var(--primary);max-width:200px;word-break:break-all;text-decoration:none}
   .media-filelink:hover{text-decoration:underline}
+  .group-row{border:2px solid var(--primary);background:#f2f7fd}
+  .group-head{background:#f2f7fd}
+  .group-head:hover{background:#e8f1fa}
+  .group-head .topic-name{color:var(--primary);font-size:15px}
+  .group-body{padding:10px 12px;border-top:1px solid var(--border);background:#fff}
+  .sub-row{margin:0 0 8px 8px;border-left:3px solid var(--primary)}
   .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--border)}
   .tab{padding:8px 22px;border:none;background:none;font-size:15px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px}
   .tab:hover{color:var(--text)}
@@ -244,6 +250,33 @@ function renderTree(nodes, depth){
 }
 
 let topicsData = [];
+let groupData = [];
+
+// 单个 topic 行(分组内嵌套时 nested=true)
+function topicRowHtml(i, t, nested){
+  const badge = t.summary_status==='ready'
+    ? '<span class="ai-badge ai-ready">AI 已生成</span>'
+    : t.summary_status==='stale'
+    ? '<span class="ai-badge ai-stale">AI 待更新</span>'
+    : '<span class="ai-badge ai-missing">AI 未生成</span>';
+  return '<div class="topic-row'+(nested?' sub-row':'')+'">'
+    + '<div class="topic-head" onclick="toggleTopic('+i+')">'
+    + '<span class="topic-name">'+esc(t.topic)+'</span>'
+    + '<span class="topic-stat">'+t.conversation_count+' 案例</span>'
+    + '<span class="topic-stat">'+t.message_count+' 条消息</span>'
+    + '<span class="topic-stat">'+t.participant_count+' 人</span>'
+    + '<span class="topic-stat">最近活跃 '+fmtMs(t.last_at)+'</span>'
+    + badge
+    + '</div>'
+    + '<div class="topic-body" id="topicBody'+i+'" style="display:none"></div>'
+    + '</div>';
+}
+
+function toggleGroup(gi){
+  const body = document.getElementById('groupBody'+gi);
+  if(!body) return;
+  body.style.display = body.style.display==='none' ? 'block' : 'none';
+}
 
 function fmtMs(v){
   if(!v) return '';
@@ -256,9 +289,14 @@ async function loadStats(){
   const box = document.getElementById('statsBox');
   box.className = 'empty-note';
   try{
-    const r = await fetch('/api/topics?limit=50');
+    const [r, g] = await Promise.all([
+      fetch('/api/topics?limit=50'),
+      fetch('/api/topic_groups'),
+    ]);
     const d = await r.json();
+    const gd = await g.json();
     topicsData = d.topics || [];
+    groupData = gd.groups || [];
     const o = d.overall || {};
     let html = '<div class="stats-overall">'
       + '<div class="stat-chip"><b>'+(o.topic_count||0)+'</b>问题类别</div>'
@@ -269,27 +307,37 @@ async function loadStats(){
     if(!topicsData.length){
       html += '<div class="empty-note">暂无已分类的问题(消息入库并完成主题分类后出现)</div>';
     }
-    topicsData.forEach((t,i)=>{
-      const badge = t.summary_status==='ready'
-        ? '<span class="ai-badge ai-ready">AI 已生成</span>'
-        : t.summary_status==='stale'
-        ? '<span class="ai-badge ai-stale">AI 待更新</span>'
-        : '<span class="ai-badge ai-missing">AI 未生成</span>';
-      html += '<div class="topic-row">'
-        + '<div class="topic-head" onclick="toggleTopic('+i+')">'
-        + '<span class="topic-name">'+esc(t.topic)+'</span>'
-        + '<span class="topic-stat">'+t.conversation_count+' 案例</span>'
-        + '<span class="topic-stat">'+t.message_count+' 条消息</span>'
-        + '<span class="topic-stat">'+t.participant_count+' 人</span>'
-        + '<span class="topic-stat">最近活跃 '+fmtMs(t.last_at)+'</span>'
-        + badge
+    // 大类(分组):组内小类按分组配置顺序嵌套展示
+    const groupOf = {};
+    groupData.forEach((gp, gi) => { (gp.topics||[]).forEach(t => { groupOf[t] = gi; }); });
+    let firstGroup = -1;
+    groupData.forEach((gp, gi) => {
+      const subs = (gp.topics||[]).map(n => topicsData.find(t => t.topic === n)).filter(Boolean);
+      if(!subs.length) return;
+      if(firstGroup < 0) firstGroup = gi;
+      const convSum = subs.reduce((a,t)=>a+(t.conversation_count||0),0);
+      const msgSum = subs.reduce((a,t)=>a+(t.message_count||0),0);
+      let inner = '';
+      for(const t of subs) inner += topicRowHtml(topicsData.indexOf(t), t, true);
+      html += '<div class="topic-row group-row">'
+        + '<div class="topic-head group-head" onclick="toggleGroup('+gi+')">'
+        + '<span class="topic-name">'+esc(gp.name)+'</span>'
+        + '<span class="topic-stat">'+subs.length+' 个小类</span>'
+        + '<span class="topic-stat">'+convSum+' 案例</span>'
+        + '<span class="topic-stat">'+msgSum+' 条消息</span>'
         + '</div>'
-        + '<div class="topic-body" id="topicBody'+i+'" style="display:none"></div>'
+        + '<div class="group-body" id="groupBody'+gi+'" style="display:none">'+inner+'</div>'
         + '</div>';
     });
+    // 未分组 topic 平铺
+    for(const t of topicsData){
+      if(groupOf[t.topic] !== undefined) continue;
+      html += topicRowHtml(topicsData.indexOf(t), t, false);
+    }
     box.innerHTML = html;
     box.className = '';
-    if(topicsData.length) toggleTopic(0, true);
+    if(firstGroup >= 0) toggleGroup(firstGroup);
+    else if(topicsData.length) toggleTopic(0, true);
   }catch(e){
     box.textContent = '统计加载失败: ' + e;
   }

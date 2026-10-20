@@ -80,18 +80,18 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>群聊总结</h1>
-  <div class="sub">问题分类统计 · 每类问题 AI 分析(问题/排查/解决)</div>
-
-  <div class="card">
-    <div class="summary-title">问题分类统计</div>
-    <div id="statsBox" class="empty-note">加载中…</div>
-  </div>
+  <div class="sub">点击「群聊总结」按钮查看:问题分类统计 · 每类问题 AI 分析(问题/排查/解决) · 单对话查看</div>
 
   <div class="bar">
-    <button class="refresh" id="convToggle" onclick="toggleConvSection()">群聊总结(单对话查看)</button>
+    <button class="refresh" onclick="toggleSummaryAll()">群聊总结</button>
   </div>
 
-  <div id="convSection" style="display:none">
+  <div id="summaryAll" style="display:none">
+    <div class="card">
+      <div class="summary-title">问题分类统计</div>
+      <div id="statsBox" class="empty-note">加载中…</div>
+    </div>
+
     <div class="bar">
       <select id="convSelect" onchange="loadSummary(this.value)"></select>
       <button class="refresh" onclick="reload()">刷新</button>
@@ -334,20 +334,20 @@ async function regenerateTopic(i){
   }
 }
 
-let convsLoaded = false;
+let summaryAllLoaded = false;
 
-function toggleConvSection(){
-  const sec = document.getElementById('convSection');
+function toggleSummaryAll(){
+  const sec = document.getElementById('summaryAll');
   const willShow = sec.style.display === 'none';
   sec.style.display = willShow ? 'block' : 'none';
-  if(willShow && !convsLoaded){
-    convsLoaded = true;
+  if(willShow && !summaryAllLoaded){
+    summaryAllLoaded = true;
     loadConversations();
+    loadStats();
   }
 }
 
 function reload(){loadConversations();loadStats();}
-window.addEventListener('DOMContentLoaded', ()=>{ loadStats(); });
 </script>
 </body>
 </html>

@@ -98,7 +98,12 @@ class ImageService:
         # 按文件名扩展名推断 MIME 类型,让七牛的 Content-Type 正确(否则默认
         # application/octet-stream,浏览器无法识别文件类型,表现为"打不开/损坏")。
         mime_type = _guess_mime(file_name)
-        ok, err = self._upload_to_qiniu(key, data, mime_type=mime_type)
+        # 文件/视频类一律走分片断点续传上传:put_data 是单个 POST,大文件
+        # (实测 ~25MB 起)会卡在 60s socket 超时(status=-1);分片上传每片
+        # 独立计超时,实测稳定。图片小且 put_data 表现良好,保持原路径。
+        ok, err = self._upload_to_qiniu(
+            key, data, mime_type=mime_type, use_file_api=(save_dir == "files")
+        )
         if not ok:
             logger.warning("上传资源到七牛失败 %s=%s: %s", res_type, file_key, err)
             return ""
@@ -162,11 +167,17 @@ class ImageService:
     _UPLOAD_RETRIES = 3
 
     def _upload_to_qiniu(
-        self, key: str, data: bytes, mime_type: str = "application/octet-stream"
+        self,
+        key: str,
+        data: bytes,
+        mime_type: str = "application/octet-stream",
+        use_file_api: bool = False,
     ) -> tuple[bool, str]:
         """把字节上传到七牛。返回 (是否成功, 出错信息)。
 
-        - 大文件(>100MB)先落临时文件再分片/断点续传上传,避免表单上传超限;
+        - use_file_api=True(文件/视频)或大文件(>100MB):落临时文件走分片/
+          断点续传上传;
+        - 其余(图片等小资源):put_data 表单上传;
         - 网络层失败自动重试,避免偶发抖动丢资源。
         """
         try:
@@ -178,7 +189,7 @@ class ImageService:
 
             last_err = "unknown"
             for attempt in range(1, self._UPLOAD_RETRIES + 1):
-                ok, last_err = self._do_upload(token, key, data, mime_type)
+                ok, last_err = self._do_upload(token, key, data, mime_type, use_file_api)
                 if ok:
                     return True, ""
                 logger.warning(
@@ -191,15 +202,15 @@ class ImageService:
             return False, str(e)
 
     def _do_upload(
-        self, token: str, key: str, data: bytes, mime_type: str
+        self, token: str, key: str, data: bytes, mime_type: str, use_file_api: bool = False
     ) -> tuple[bool, str]:
         """单次上传。返回 (是否成功, 出错信息)。"""
-        if len(data) <= self._CHUNK_THRESHOLD:
+        if use_file_api or len(data) > self._CHUNK_THRESHOLD:
+            ret, info = self._put_large(token, key, data, mime_type)
+        else:
             from qiniu import put_data
 
             ret, info = put_data(token, key, data=data, mime_type=mime_type)
-        else:
-            ret, info = self._put_large(token, key, data, mime_type)
         if info is not None and info.status_code == 200:
             return True, ""
         return False, _qiniu_info_message(info)

@@ -431,9 +431,10 @@ def _resolve_post_images(raw: dict, message_id: str) -> None:
         return
     svc = get_image_service()
     urls: list[str] = []
-    for i, key in enumerate(keys):
+    for key in keys:
         try:
-            urls.append(svc.resolve_image_url(key, f"{message_id}-{i}"))
+            # 飞书资源下载接口必须带真实 message_id;七牛 key 用 image_key,天然唯一
+            urls.append(svc.resolve_image_url(key, message_id))
         except Exception:  # noqa: BLE001
             logger.warning("处理 post 内嵌图片异常 image_key=%s", key, exc_info=True)
             urls.append("")

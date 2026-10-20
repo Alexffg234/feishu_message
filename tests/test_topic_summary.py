@@ -297,6 +297,47 @@ def test_media_numbered_and_persisted():
     print("media numbered & persisted OK")
 
 
+def test_post_embedded_images_numbered():
+    """post 富文本内嵌图片(方案步骤图)应编号并提示 LLM,media 供前端渲染。"""
+    svc, session, Session = _setup()
+    svc.save_message(_msg("q1", "u1", T0, text="电脑投屏找不到设备 麻烦看下"))
+    svc.save_message(_msg("a1", "u2", T0 + 30_000, text="按这个步骤,下方附的有图", mtype="post"))
+    svc.save_message(_msg("a2", "u1", T0 + 60_000, text="好的 我试下"))
+    a1 = session.query(Message).filter(Message.message_id == "a1").one()
+    a1.raw = {"content": [[{"tag": "img", "image_key": "k1"}]],
+              "image_urls": ["https://cdn/post_step.png"]}
+    session.commit()
+    for root in ("q1", "a1", "a2"):
+        _set_topic(session, root, "投屏")
+    llm = FakeLLM()
+    ts = _svc(Session, llm)
+    out = ts.generate_topic(CHAT, "投屏")
+    assert out is not None, "含富文本内嵌图 topic 应能生成"
+    ctx = llm.calls[0]
+    assert "按这个步骤" in ctx, ctx
+    assert "(本条富文本内嵌图片: 图#1)" in ctx, ctx
+    assert out["media"] == [
+        {"idx": 1, "type": "image", "url": "https://cdn/post_step.png",
+         "name": "", "at": str(T0 + 30_000)}
+    ], out["media"]
+    row = session.query(TopicSummary).one()
+    assert row.media_refs[0]["url"] == "https://cdn/post_step.png"
+    print("post embedded images OK")
+
+
+def test_extract_post_image_keys_order_and_dedup():
+    from app.services.message_service import _extract_post_image_keys
+    content = [
+        [{"tag": "text", "text": "第一步"}],
+        [{"tag": "img", "image_key": "k1"}],
+        [],
+        [{"tag": "img", "image_key": "k2"}, {"tag": "img", "image_key": "k1"}],
+    ]
+    assert _extract_post_image_keys(content) == ["k1", "k2"]
+    assert _extract_post_image_keys(None) == []
+    assert _extract_post_image_keys([]) == []
+
+
 def test_get_cached_missing_and_fresh():
     svc, session, Session = _setup()
     _seed(svc, session)

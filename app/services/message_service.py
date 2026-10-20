@@ -73,6 +73,8 @@ class MessageService:
                 _resolve_video(raw, msg.message_id or "")
             elif msg_type == "file":
                 _resolve_file(raw, msg.message_id or "")
+            elif msg_type == "post":
+                _resolve_post_images(raw, msg.message_id or "")
 
 
         # 解析回复关系(仅回复消息带 parent_id / root_id)
@@ -401,6 +403,44 @@ def _resolve_video(raw: dict, message_id: str) -> None:
             raw["image_url"] = svc.resolve_image_url(cover_key, message_id)
         except Exception:  # noqa: BLE001
             logger.warning("处理视频封面异常 image_key=%s", cover_key, exc_info=True)
+
+
+def _extract_post_image_keys(content: Any) -> list[str]:
+    """从富文本 post 的 content 里按出现顺序提取内嵌图片 image_key 列表。"""
+    keys: list[str] = []
+    if isinstance(content, list):
+        for section in content:
+            if isinstance(section, list):
+                for run in section:
+                    if isinstance(run, dict) and run.get("tag") == "img":
+                        k = run.get("image_key") or ""
+                        if k and k not in keys:
+                            keys.append(k)
+    return keys
+
+
+def _resolve_post_images(raw: dict, message_id: str) -> None:
+    """富文本 post:提取内嵌 img 的 image_key,逐个下载上传七牛。
+
+    结果写入 raw.image_urls(URL 列表,与 image_key 顺序一致);
+    兼容单图展示,首张同时写入 raw.image_url。
+    未配置/失败优雅降级(该位置留空字符串),不阻塞入库。
+    """
+    keys = _extract_post_image_keys(raw.get("content"))
+    if not keys:
+        return
+    svc = get_image_service()
+    urls: list[str] = []
+    for i, key in enumerate(keys):
+        try:
+            urls.append(svc.resolve_image_url(key, f"{message_id}-{i}"))
+        except Exception:  # noqa: BLE001
+            logger.warning("处理 post 内嵌图片异常 image_key=%s", key, exc_info=True)
+            urls.append("")
+    raw["image_urls"] = urls
+    raw.setdefault("image_url", "")
+    if not raw["image_url"]:
+        raw["image_url"] = next((u for u in urls if u), "")
 
 
 def _resolve_file(raw: dict, message_id: str) -> None:

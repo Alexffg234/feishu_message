@@ -54,6 +54,8 @@ _SYSTEM_PROMPT = (
     "例如:「第1步:确认故障现象(见图#1)」;\n"
     "- 解决方案/操作步骤配图(回复给出解决办法时附带的界面截图、步骤演示,如「按这个步骤,附的有图」后面的图)"
     "→ 必须在 resolution 的对应步骤引用,例如:「进入投屏设置,按图中步骤操作(见图#5)」;\n"
+    "- 消息文本后若带「(本条富文本内嵌图片: 图#N ...)」,表示该富文本消息在文字后面内嵌了图片,"
+    "这类图通常就是该回复给出的方案/步骤截图,相关时必须引用到 resolution 对应步骤;\n"
     "- 与排查、解决均无关的媒体(如闲聊截图)不要引用。"
 )
 
@@ -88,6 +90,27 @@ def _parse_llm_json(raw: str) -> dict | None:
     return data
 
 
+def _post_media_labels(m: Message, media_refs: list[dict]) -> str:
+    """post 富文本内嵌图片:逐个编号,返回 '图#3、图#4';无内嵌图返回 ''。
+
+    内嵌图常是方案回复附带的步骤截图(如「按这个步骤,下方附的有图」)。
+    """
+    if (m.message_type or "") != "post":
+        return ""
+    raw = m.raw if isinstance(m.raw, dict) else {}
+    urls = raw.get("image_urls") or []
+    names: list[str] = []
+    for url in urls:
+        if not url:
+            continue
+        idx = len(media_refs) + 1
+        media_refs.append(
+            {"idx": idx, "type": "image", "url": url, "name": "", "at": m.create_time}
+        )
+        names.append(f"图#{idx}")
+    return "、".join(names)
+
+
 def _media_label(m: Message, media_refs: list[dict]) -> str:
     """非文本消息的占位描述(让 LLM 知道这里有过图片/视频等证据)。
 
@@ -97,6 +120,9 @@ def _media_label(m: Message, media_refs: list[dict]) -> str:
     mtype = m.message_type or ""
     raw = m.raw if isinstance(m.raw, dict) else {}
     name = raw.get("file_name") or raw.get("name") or ""
+    if mtype == "post":
+        extra = _post_media_labels(m, media_refs)
+        return f"(富文本,内嵌图片: {extra})" if extra else "(富文本)"
     if mtype == "image":
         url, zh = raw.get("image_url") or "", "图"
     elif mtype == "media":
@@ -261,7 +287,11 @@ class TopicSummaryService:
                 text = (m.text or "").strip()
                 if text:
                     name = name_map.get(m.sender_id) or m.sender_id or "?"
-                    lines.append(f"[{_fmt_ts(m.create_time)}] {name}: {text[:_MAX_TEXT_LEN]}")
+                    line = f"[{_fmt_ts(m.create_time)}] {name}: {text[:_MAX_TEXT_LEN]}"
+                    extra = _post_media_labels(m, media_refs)
+                    if extra:
+                        line += f"(本条富文本内嵌图片: {extra})"
+                    lines.append(line)
                     text_lines += 1
                 else:
                     lines.append(f"[{_fmt_ts(m.create_time)}] ({m.sender_id or '?'}): "

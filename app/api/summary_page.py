@@ -86,6 +86,11 @@ SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
   .group-head:hover{background:#e8f1fa}
   .group-head .topic-name{color:var(--primary);font-size:15px}
   .group-body{padding:10px 12px;border-top:1px solid var(--border);background:#fff}
+  .subgroup-row{border:1px solid var(--border);background:#f8fafc;margin:0 0 8px 10px}
+  .subgroup-head{background:#f8fafc}
+  .subgroup-head:hover{background:#eef3f9}
+  .subgroup-head .topic-name{color:var(--accent);font-size:14px}
+  .subgroup-body{background:#fbfcfd}
   .sub-row{margin:0 0 8px 8px;border-left:3px solid var(--primary)}
   .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--border)}
   .tab{padding:8px 22px;border:none;background:none;font-size:15px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px}
@@ -278,6 +283,12 @@ function toggleGroup(gi){
   body.style.display = body.style.display==='none' ? 'block' : 'none';
 }
 
+function toggleSubGroup(gi, si){
+  const body = document.getElementById('subGroupBody'+gi+'_'+si);
+  if(!body) return;
+  body.style.display = body.style.display==='none' ? 'block' : 'none';
+}
+
 function fmtMs(v){
   if(!v) return '';
   const d = new Date(Number(v));
@@ -307,22 +318,53 @@ async function loadStats(){
     if(!topicsData.length){
       html += '<div class="empty-note">暂无已分类的问题(消息入库并完成主题分类后出现)</div>';
     }
-    // 大类(分组):组内小类按分组配置顺序嵌套展示
+    // 大类(分组):支持两级。parent 非空的组是指向组的子类(组内再嵌 topic);
+    // parent 指向的组不存在时按顶级兜底;组内小类按分组配置顺序展示
     const groupOf = {};
     groupData.forEach((gp, gi) => { (gp.topics||[]).forEach(t => { groupOf[t] = gi; }); });
+    const groupNames = new Set(groupData.map(gp => gp.name));
+    const isTop = gp => !gp.parent || !groupNames.has(gp.parent);
     let firstGroup = -1;
     groupData.forEach((gp, gi) => {
-      const subs = (gp.topics||[]).map(n => topicsData.find(t => t.topic === n)).filter(Boolean);
-      if(!subs.length) return;
+      if(!isTop(gp)) return;
+      const direct = (gp.topics||[]).map(n => topicsData.find(t => t.topic === n)).filter(Boolean);
+      let subInner = '';
+      const subTopics = [];
+      let subCount = 0;
+      groupData.forEach((s, si) => {
+        if(s.parent !== gp.name) return;
+        const ssubs = (s.topics||[]).map(n => topicsData.find(t => t.topic === n)).filter(Boolean);
+        if(!ssubs.length) return;
+        subCount++;
+        subTopics.push(...ssubs);
+        const sconv = ssubs.reduce((a,t)=>a+(t.conversation_count||0),0);
+        const smsg = ssubs.reduce((a,t)=>a+(t.message_count||0),0);
+        let sinner = '';
+        for(const t of ssubs) sinner += topicRowHtml(topicsData.indexOf(t), t, true);
+        subInner += '<div class="topic-row subgroup-row">'
+          + '<div class="topic-head subgroup-head" onclick="toggleSubGroup('+gi+','+si+')">'
+          + '<span class="topic-name">'+esc(s.name)+'</span>'
+          + '<span class="topic-stat">'+ssubs.length+' 个小类</span>'
+          + '<span class="topic-stat">'+sconv+' 案例</span>'
+          + '<span class="topic-stat">'+smsg+' 条消息</span>'
+          + '</div>'
+          + '<div class="group-body subgroup-body" id="subGroupBody'+gi+'_'+si+'" style="display:none">'+sinner+'</div>'
+          + '</div>';
+      });
+      const allTopics = [...subTopics, ...direct];
+      if(!allTopics.length) return;
       if(firstGroup < 0) firstGroup = gi;
-      const convSum = subs.reduce((a,t)=>a+(t.conversation_count||0),0);
-      const msgSum = subs.reduce((a,t)=>a+(t.message_count||0),0);
-      let inner = '';
-      for(const t of subs) inner += topicRowHtml(topicsData.indexOf(t), t, true);
+      const convSum = allTopics.reduce((a,t)=>a+(t.conversation_count||0),0);
+      const msgSum = allTopics.reduce((a,t)=>a+(t.message_count||0),0);
+      let inner = subInner;
+      for(const t of direct) inner += topicRowHtml(topicsData.indexOf(t), t, true);
+      const countLabel = subCount
+        ? subCount+' 个子类'+(direct.length?' / '+direct.length+' 个小类':'')
+        : direct.length+' 个小类';
       html += '<div class="topic-row group-row">'
         + '<div class="topic-head group-head" onclick="toggleGroup('+gi+')">'
         + '<span class="topic-name">'+esc(gp.name)+'</span>'
-        + '<span class="topic-stat">'+subs.length+' 个小类</span>'
+        + '<span class="topic-stat">'+countLabel+'</span>'
         + '<span class="topic-stat">'+convSum+' 案例</span>'
         + '<span class="topic-stat">'+msgSum+' 条消息</span>'
         + '</div>'

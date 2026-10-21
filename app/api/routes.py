@@ -46,10 +46,14 @@ logger = logging.getLogger(__name__)
 
 
 class TopicGroupIn(BaseModel):
-    """问题大类(主题分组)入参:同名 upsert,topics 整体覆盖。"""
+    """问题大类(主题分组)入参:同名 upsert,topics 整体覆盖。
+
+    parent 可选:填另一组名则本组作为其子类(两级分组),空串=顶级大类。
+    """
 
     name: str
     topics: list[str]
+    parent: str = ""
 
 
 # dispatcher 在应用工厂中注入
@@ -308,7 +312,12 @@ def api_topic_groups_list(db: Session = Depends(get_session)) -> dict:
     rows = db.query(TopicGroup).order_by(TopicGroup.sort_order, TopicGroup.id).all()
     return {
         "groups": [
-            {"name": r.name, "topics": r.topics or [], "sort_order": r.sort_order}
+            {
+                "name": r.name,
+                "topics": r.topics or [],
+                "sort_order": r.sort_order,
+                "parent": r.parent or "",
+            }
             for r in rows
         ]
     }
@@ -316,25 +325,32 @@ def api_topic_groups_list(db: Session = Depends(get_session)) -> dict:
 
 @router.post("/api/topic_groups")
 def api_topic_groups_upsert(body: TopicGroupIn, db: Session = Depends(get_session)) -> dict:
-    """创建/更新问题大类(name 唯一,topics 整体覆盖)。"""
+    """创建/更新问题大类(name 唯一,topics 整体覆盖)。
+
+    两级分组:填 parent(父组名)则本组作为其子类;仅含子类的顶级组 topics 可为空。
+    """
     from app.models.topic_group import TopicGroup
 
     name = (body.name or "").strip()
+    parent = (body.parent or "").strip()
     topics = [t.strip() for t in body.topics if (t or "").strip()]
-    if not name or not topics:
-        raise HTTPException(status_code=400, detail="name 与 topics 不能为空")
+    if not name:
+        raise HTTPException(status_code=400, detail="name 不能为空")
     row = db.query(TopicGroup).filter(TopicGroup.name == name).first()
     if row is None:
         from sqlalchemy import func
 
         max_order = db.query(func.max(TopicGroup.sort_order)).scalar() or 0
-        row = TopicGroup(name=name, topics=topics, sort_order=int(max_order) + 1)
+        row = TopicGroup(
+            name=name, topics=topics, parent=parent, sort_order=int(max_order) + 1
+        )
         db.add(row)
     else:
         row.topics = topics
+        row.parent = parent
     db.commit()
     db.refresh(row)
-    return {"name": row.name, "topics": row.topics or []}
+    return {"name": row.name, "parent": row.parent or "", "topics": row.topics or []}
 
 
 @router.delete("/api/topic_groups/{name}")

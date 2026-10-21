@@ -69,6 +69,7 @@ def init_db() -> None:
     _ensure_conversation_columns()
     _ensure_segment_columns()
     _ensure_topic_summary_columns()
+    _ensure_topic_group_columns()
     logger.info("数据库表结构就绪: %s", get_settings().database_url)
 
 
@@ -177,6 +178,26 @@ def _ensure_topic_summary_columns() -> None:
                 )
             )
             logger.info("topic_summaries 表新增列 knowledge_hash")
+
+
+def _ensure_topic_group_columns() -> None:
+    """轻量迁移:为存量 topic_groups 表补 parent 列(两级分组:父组名,空=顶级)。"""
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "topic_groups" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("topic_groups")}
+    with engine.begin() as conn:
+        if "parent" not in existing:
+            conn.execute(
+                sql_text(
+                    "ALTER TABLE topic_groups ADD COLUMN parent "
+                    "VARCHAR(128) NOT NULL DEFAULT ''"
+                )
+            )
+            logger.info("topic_groups 表新增列 parent")
 
 
 def check_db_connection() -> bool:

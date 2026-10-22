@@ -2,9 +2,13 @@
 
 - 入库不阻塞:消息落库后由后台线程池异步分类
 - 以「回复链分组」为粒度打标签(1 组 = 1 次 LLM 调用),组内共享同一 topic
-- 分类时把库里已有主题列表(附最近消息摘要)传给 LLM,保证同一问题沿用同一标签
+- 分类时把「标准标签」(问题大类配置的 topic 名)与库里已有主题列表
+  (附最近消息摘要)传给 LLM:同类问题优先原样沿用标准标签,
+  使新案例自动挂进 /summary 页对应大类
 - 打完标签触发同主题归组:同群内相同 topic 的组归并到最早组
   (「直接发言无回复」的碎片反馈靠标签归回原问题块,不依赖时间窗)
+  标准标签例外:多个案例共享同一标准标签,只归类不合并,
+  同案例的后续会话由会话缝合(conv_stitch)负责
 - 未配置 LLM / 调用失败时优雅降级:topic 留空,后续可重分类
 """
 from __future__ import annotations
@@ -28,14 +32,18 @@ logger = logging.getLogger(__name__)
 _SYSTEM_PROMPT = (
     "你是群聊消息主题分类器。请把下面这段对话归纳为一个简短主题标签。\n"
     "要求:\n"
-    "1. 标签为 2~10 字中文短语,概括对话讨论的功能或问题(例如:投屏、远场语音唤不醒、蓝牙连接)。\n"
-    "2. 仅当能确认当前对话与某已有主题是同一台机器/同一故障案例的延续"
+    "1. 优先沿用标准标签:「标准标签列表」是问题大类预配置的标准名称。"
+    "若当前对话讨论的问题与其中某一项属于同一类问题(同类故障/同类事项,"
+    "不要求同一台机器或同一用户),必须原样输出该标准标签,不得新造同义标签。\n"
+    "2. 标签为 2~10 字中文短语(沿用标准标签时原样输出即可),概括对话讨论的功能或问题"
+    "(例如:投屏、远场语音唤不醒、蓝牙连接)。\n"
+    "3. 仅当能确认当前对话与某已有主题是同一台机器/同一故障案例的延续"
     "(如出现相同机器编号/UUID/MAC,或同一用户且前文明确在接续讨论该故障)"
     "时,才必须原样沿用对应的已有标签,不得新造同义标签。\n"
     "   注意:仅措辞或关键词相似(如都提到「推送」「闪退」「二维码」)但机器、用户、"
     "前文上下文与该主题无关联的,是全新问题,必须给新标签;\n"
     "   拿不准是否同一案例时,优先给新标签(宁可多一个对话,不可把新问题混进旧对话)。\n"
-    "3. 只输出标签本身,不要引号、标点或任何解释。"
+    "4. 只输出标签本身,不要引号、标点或任何解释。"
 )
 
 # 分类失败后,同一组的最小重试间隔(秒),防止 LLM 故障时反复打
@@ -61,6 +69,27 @@ _STOP_LABELS = {
     "对对", "可以", "行", "ok", "ok的", "明白", "了解", "知道了",
     "谢谢", "好的谢谢", "好滴", "嗯好", "好嘞",
 }
+
+
+def get_standard_labels(session) -> list[str]:
+    """问题大类配置的 topic 名(标准标签),按组展示顺序展开、去重。
+
+    分类提示词注入该列表:同类问题沿用标准名,新案例自动挂进对应大类。
+    """
+    from app.models.topic_group import TopicGroup
+
+    rows = (
+        session.query(TopicGroup).order_by(TopicGroup.sort_order, TopicGroup.id).all()
+    )
+    labels: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        for t in r.topics or []:
+            t = (t or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                labels.append(t)
+    return labels
 
 
 def _clean_label(raw: str) -> str:
@@ -154,9 +183,10 @@ class TopicService:
                 to_merge = existing_topic if merge else ""
             else:
                 samples = self._existing_topic_samples(repo, chat_id)
+                standards = get_standard_labels(session)
                 first_id = min(m.id for m in rows)
                 context = repo.list_recent_before(chat_id, first_id, limit=6)
-                label = self._llm_label(rows, samples, context)
+                label = self._llm_label(rows, samples, context, standards)
                 if not label:
                     raise LLMError("LLM 返回空标签")
                 repo.set_topic_for_group(chat_id, root_message_id, label)
@@ -164,7 +194,9 @@ class TopicService:
                 ConversationRepo(session).set_topic(chat_id, root_message_id, label)
                 session.commit()
                 logger.info("主题分类 %s/%s -> %s", chat_id, root_message_id, label)
-                to_merge = label if merge else ""
+                # 标准标签=问题大类标准名,多个不同案例共享:只归类不合并,
+                # 同案例的后续会话交给会话缝合(conv_stitch)处理
+                to_merge = label if (merge and label not in standards) else ""
         # 归并用独立 session,避免与分类 session 并发占用连接
         if to_merge:
             self._merge_topic(chat_id, to_merge)
@@ -274,6 +306,7 @@ class TopicService:
         rows: list,
         samples: list[tuple[str, str]],
         context: list | None = None,
+        standards: list[str] | None = None,
     ) -> str:
         lines = []
         for m in rows[:_MAX_ROWS_PROMPT]:
@@ -296,7 +329,9 @@ class TopicService:
                 f"[{_fmt_time(m.create_time)}] {m.sender_id or '?'}{tag}: {text[:60]}"
             )
         context_str = "\n".join(ctx_lines) if ctx_lines else "(无)"
+        standards_str = "、".join(standards) if standards else "(无)"
         user_prompt = (
+            f"标准标签(问题大类预配置的标准名称,同类问题必须原样沿用其一):\n{standards_str}\n\n"
             f"本组之前的最近消息(按时间升序,用于判断是否延续前面讨论):\n{context_str}\n\n"
             f"已有主题(附各主题最近一条消息摘要):\n{existing_str}\n\n"
             f"当前对话内容:\n" + "\n".join(lines)

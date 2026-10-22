@@ -8,6 +8,8 @@ LLM 输出 {待合并标签: 保留标签} 映射,应用后触发同标签归并
 语义:
 - 只处理同群(chat_id 内)的标签
 - 保留标签必须是输入中已存在的标签,不得新造
+- 保留标签为标准标签(问题大类配置的 topic 名)时只改名不合并
+  (标准名被多个不同案例共享,合并会串案)
 - 幂等:无映射或标签已统一时为无操作
 - 开关:settings.topic_merge_enabled=False 时不执行
 """
@@ -112,6 +114,10 @@ def consolidate_labels(
         mapping = _resolve(_parse_mapping(raw, topics))
         if not mapping:
             continue
+        # 标准标签=问题大类标准名,多案例共享:归并到标准名只改名不合并
+        from app.services.topic_service import get_standard_labels
+
+        standards = set(get_standard_labels(session))
         for old, new in mapping.items():
             session.execute(
                 update(Message)
@@ -127,5 +133,7 @@ def consolidate_labels(
             logger.info("标签归并 %s: %s -> %s", c, old, new)
         session.commit()
         for new in set(mapping.values()):
+            if new in standards:
+                continue
             merge_topic_group(session, c, new)
     return applied

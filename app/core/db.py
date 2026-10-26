@@ -74,7 +74,7 @@ def init_db() -> None:
 
 
 def _ensure_message_group_columns() -> None:
-    """轻量迁移:为存量 messages 表补 parent_message_id / root_message_id。
+    """轻量迁移:为存量 messages 表补 parent_message_id / root_message_id / block_start。
 
     - 缺列则 ALTER TABLE ADD COLUMN(SQLite/MySQL/PostgreSQL 均支持)
     - 回填:老消息无回复信息,每条自成一个组(root=自身)
@@ -97,6 +97,14 @@ def _ensure_message_group_columns() -> None:
                     )
                 )
                 logger.info("messages 表新增列 %s", col)
+        if "block_start" not in existing:
+            conn.execute(
+                sql_text(
+                    "ALTER TABLE messages ADD COLUMN block_start "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+            logger.info("messages 表新增列 block_start")
         conn.execute(
             sql_text(
                 "UPDATE messages SET root_message_id = message_id "

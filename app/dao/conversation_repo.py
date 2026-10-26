@@ -166,6 +166,8 @@ class ConversationRepo:
             "create_time": m.create_time,
             "parent_message_id": m.parent_message_id,
             "topic": m.topic,
+            # 新问题块起点(带已有标签的新消息并入对话时=1,前端画横杠)
+            "block_start": int(m.block_start or 0),
             "mentions": mentions or {},
             # 图片消息:image_key 飞书临时凭证,image_url 七牛可展示 URL
             "image_key": image_key or "",

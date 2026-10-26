@@ -82,6 +82,17 @@ def merge_groups(
         for m in source_rows:
             m.root_message_id = target_root
             m.conversation_id = target_conv.id
+        # 1b) 新消息带着已有标签并入既有对话 → 标记新问题块起点(首条消息),
+        #     前端在完整对话里于该消息前画横杠;无标签(空)不标记
+        if any((m.topic or "").strip() for m in source_rows):
+            first_row = min(
+                source_rows,
+                key=lambda r: (
+                    int(r.create_time) if (r.create_time or "").isdigit() else 0,
+                    r.id,
+                ),
+            )
+            first_row.block_start = 1
         # 2) 源对话的回复边移入目标对话(树在目标对话下呈现多个根节点)
         if source_conv is not None:
             session.execute(

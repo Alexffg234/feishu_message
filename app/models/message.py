@@ -94,6 +94,8 @@ class Message(Base):
         default=0,
         index=True,
     )
+    # 新问题块起点标记:带已有标签的新消息并入既有对话时=1,前端在该消息前画横杠
+    block_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
     # 原始结构化数据(图片/文件等附加字段)

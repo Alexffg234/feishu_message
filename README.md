@@ -127,7 +127,7 @@ python scripts/create_user.py --list                   # 查看全部账号
 | `ALLOW_PUBLIC_REGISTER` | `true` | 关 false 后只能用 `create_user.py` 开号;**库里无账号时注册恒开放**,否则无法创建首个管理员 |
 | `SESSION_TTL_HOURS` | `12` | 登录态有效期 |
 | `SESSION_SECRET` | 空 | 会话签名密钥;留空自动生成并持久化到 `data/.session_secret`。**多实例部署必须显式配成同一个值** |
-| `COOKIE_SECURE` | `false` | 站点为 https 时必须置 `true` |
+| `COOKIE_SECURE` | `false` | 会话 cookie 是否仅 HTTPS 传输。**看浏览器访问的协议，不是看应用监听的协议**：站点对外是 http 就保持 `false`；对外是 https 必须置 `true`（即使用 nginx 做了 SSL 终结、FastAPI 本身只监听 127.0.0.1 的 http） |
 
 ### 密码复杂度要求
 
@@ -399,7 +399,7 @@ GET /health -> {"status":"ok"}
 - **只想要特定群**：在 `.env` 填写 `ALLOWED_CHAT_IDS=oc_xxx,oc_yyy`。
 - **忘记密码**：`python scripts/create_user.py 用户名 --reset-pwd 新密码`
 - **页面显示「自助注册已关闭」**：库里已有账号且 `ALLOW_PUBLIC_REGISTER=false`,用 `create_user.py` 开号。
-- **登录成功仍跳回登录页**：站点是 https 但 `COOKIE_SECURE=false`,浏览器不会回传 cookie。
+- **登录成功仍跳回登录页**：`COOKIE_SECURE` 与站点实际协议不匹配。https 站点却设了 `false`，或 http 站点却设了 `true`，浏览器都不会回传 cookie（后者连第一次 `Set-Cookie` 都会被丢弃）。
 - **多实例部署反复掉线**：各实例 `SESSION_SECRET` 不一致,配成同一个值。
 
 ## 安全

@@ -80,7 +80,7 @@ def test_feishu_callback_not_blocked(client):
 def test_register_first_user_is_admin(client):
     name = _uname("admin")
     r = client.post(
-        "/api/auth/register", json={"username": name, "password": "pass12345"}
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
     )
     assert r.status_code == 200, r.text
     assert r.json()["role"] == "admin"
@@ -90,11 +90,11 @@ def test_register_first_user_is_admin(client):
 def test_register_rejects_duplicate_and_weak(client):
     name = _uname("dup")
     assert client.post(
-        "/api/auth/register", json={"username": name, "password": "pass12345"}
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
     ).status_code == 200
     # 重名
     r = client.post(
-        "/api/auth/register", json={"username": name, "password": "pass12345"}
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
     )
     assert r.status_code == 400
     # 弱密码
@@ -104,24 +104,74 @@ def test_register_rejects_duplicate_and_weak(client):
     assert r.status_code == 400
 
 
+def test_password_complexity_rules():
+    """密码复杂度:长度 / 字母+数字 / 弱密码 / 重复字符 / 连续字符。"""
+    from app.services.auth_service import password_issues, password_strength
+
+    assert password_issues("feishu2026x") == []
+    assert password_issues("Kx7m2q9p") == []
+    assert password_strength("feishu2026x") >= 1
+
+    cases = {
+        "short1": "长度不足",
+        "abcdefgh": "缺数字",
+        "12345678": "纯数字且属弱密码",
+        "1111abcd": "同一字符重复 4 次",
+        "abc12345": "5 位连续字符",
+        "password": "常见弱密码",
+        "qwerty12": "常见弱密码",
+    }
+    for pwd, why in cases.items():
+        assert password_issues(pwd), f"{pwd} 应被拒绝({why})"
+
+
+def test_register_rejects_weak_password_variants(client):
+    """各类不合规密码均返回 400,并带上具体原因。"""
+    for pwd in ("abcdefgh", "12345678", "1111abcd", "abc12345", "password"):
+        r = client.post(
+            "/api/auth/register",
+            json={"username": _uname("bad"), "password": pwd},
+        )
+        assert r.status_code == 400, f"{pwd} 不应通过"
+        assert "密码" in r.json()["detail"]
+
+
+def test_register_status_exposes_password_rules(client):
+    data = client.get("/api/auth/register").json()
+    assert data["open"] is True
+    assert data["min_len"] == 8
+    assert isinstance(data["password_rules"], list) and len(data["password_rules"]) >= 3
+    # 规则应出现在页面里(页面用后端下发的规则渲染清单)
+    assert "同时包含字母和数字" in " ".join(data["password_rules"])
+
+
 def test_login_ok_then_access_page(client):
     name = _uname("login")
-    client.post("/api/auth/register", json={"username": name, "password": "pass12345"})
+    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
     client.post("/api/auth/logout")
 
-    r = client.post("/api/auth/login", json={"username": name, "password": "pass12345"})
+    r = client.post("/api/auth/login", json={"username": name, "password": "feishu2026x"})
     assert r.status_code == 200, r.text
     me = client.get("/api/auth/me")
     assert me.status_code == 200 and me.json()["username"] == name
 
     page = client.get("/summary")
     assert page.status_code == 200
-    assert "退出登录" in page.text
+    # 顶部导航(含退出登录)由 static/nav.js 动态渲染到 #app-nav 挂载点
+    assert 'id="app-nav"' in page.text
+    assert "/static/nav.js" in page.text
+
+
+def test_static_assets_reachable_without_login(client):
+    """静态资源(CSS/JS)在未登录时必须可访问,否则页面样式与导航会被拦成 401。"""
+    for asset in ("/static/components.css", "/static/nav.js", "/static/login.css"):
+        r = client.get(asset)
+        assert r.status_code == 200, f"{asset} -> {r.status_code}"
 
 
 def test_wrong_password_and_unknown_user_same_error(client):
     name = _uname("pw")
-    client.post("/api/auth/register", json={"username": name, "password": "pass12345"})
+    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
     client.post("/api/auth/logout")
 
     r1 = client.post("/api/auth/login", json={"username": name, "password": "wrongpass"})
@@ -134,7 +184,7 @@ def test_wrong_password_and_unknown_user_same_error(client):
 
 def test_logout_clears_session(client):
     name = _uname("out")
-    client.post("/api/auth/register", json={"username": name, "password": "pass12345"})
+    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
     assert client.get("/api/auth/me").status_code == 200
     client.post("/api/auth/logout")
     assert client.get("/api/auth/me").status_code == 401
@@ -152,7 +202,7 @@ def test_password_hash_roundtrip():
 def test_session_tamper_rejected(client):
     name = _uname("sig")
     r = client.post(
-        "/api/auth/register", json={"username": name, "password": "pass12345"}
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
     )
     token = r.cookies[COOKIE_NAME]
     body, _, sig = token.rpartition(".")

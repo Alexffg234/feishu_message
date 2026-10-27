@@ -15,6 +15,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# 前端静态资源目录(CSS / JS / 页面模板)
+# 由 app/main.py 挂载到 /static,注意认证中间件需放行该前缀
+STATIC_DIR = BASE_DIR / "app" / "static"
+
 
 class Settings(BaseSettings):
     """应用配置。所有字段均可通过同名环境变量覆盖(前缀 APP_ 可选)。"""

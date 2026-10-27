@@ -31,16 +31,44 @@ feishu_message/
 │   ├── move_messages.py            # 把某对话时间窗内消息挪入另一对话
 │   └── backfill_block_start.py     # 存量对话回填新问题块起点(横杠)标记
 └── app/
-    ├── main.py             # FastAPI 应用工厂(含访问控制中间件装配)
+    ├── main.py             # FastAPI 应用工厂(静态资源挂载 + 访问控制中间件)
     ├── api/routes.py       # HTTP 路由(事件回调 + 查询接口)
     ├── api/auth.py         # 登录注册接口 + 全站访问控制中间件
-    ├── api/login_page.py   # 登录/注册页(内建 HTML)
+    ├── static/             # 前端资源(挂载到 /static,登录页在此)
+    │   ├── login.html          # 登录/注册页结构(语义化 + ARIA)
+    │   ├── login.css           # 设计令牌 + 布局 + 组件 + 响应式
+    │   └── login.js            # 交互(校验/强度/切换/提交),无全局污染
     ├── core/               # 配置 / 数据库 / 日志
     ├── models/             # ORM 模型(message / conversation / user ...)
     ├── schemas/message.py  # Pydantic schema
     ├── dao/                # 数据访问层(message / conversation_repo)
     └── services/           # 事件处理 / 业务逻辑(含分组、主题、认证)
 ```
+
+### 前端资源
+
+页面为**独立静态文件**(非 Python 内联字符串),挂载在 `/static`,由路由返回:
+
+| 文件 | 作用 |
+|---|---|
+| `static/components.css` | **公共层**:全站唯一设计令牌 + 顶部导航 + 通用组件(卡片/按钮/下拉/徽章/空态) |
+| `static/nav.js` | **顶部导航**:动态渲染到 `#app-nav`,展示当前用户与退出入口 |
+| `static/login.{html,css,js}` | 登录 / 注册页 |
+| `static/summary.{html,css,js}` | 群聊总结页 |
+| `static/habits.{html,css,js}` | 对话习惯分析页 |
+
+约定与注意事项:
+
+- **令牌唯一来源**:所有页面的颜色/圆角/动效都取自 `components.css` 的 `:root`,
+  页面 CSS 只写专属布局,不得重复定义 `:root`(旧页面用的 `--bg/--card/--border`
+  已作为兼容别名映射到新令牌)。
+- **全站深色**:登录页与业务页统一深色主题;主色 `#185fa5` 在深色下提亮为 `#3b8ede`,
+  辅色 `#0f6e56` 提亮为 `#3fc79a`。
+- **顶部导航**:页面只需放 `<div id="app-nav"></div>` 并引入 `nav.js`,
+  导航(含页面切换、当前用户、退出登录)由 JS 统一渲染,改一处全站生效。
+- 认证中间件对 `/static/` 前缀放行,否则未登录时 CSS/JS 会被 401 拦截。
+- 改样式/交互只需改 `app/static/` 下的文件,**不必重启服务**(强刷即可);
+  资源带版本号 `?v=1.0.0`,改动后递增版本号可强制刷新缓存。
 
 ## 对话关系存储
 
@@ -100,6 +128,19 @@ python scripts/create_user.py --list                   # 查看全部账号
 | `SESSION_TTL_HOURS` | `12` | 登录态有效期 |
 | `SESSION_SECRET` | 空 | 会话签名密钥;留空自动生成并持久化到 `data/.session_secret`。**多实例部署必须显式配成同一个值** |
 | `COOKIE_SECURE` | `false` | 站点为 https 时必须置 `true` |
+
+### 密码复杂度要求
+
+注册与改密(`create_user.py --reset-pwd`)都必须满足,**已存在的旧密码不受影响,仍可正常登录**:
+
+1. 长度 8~128 位
+2. 同时包含字母和数字
+3. 不能是常见弱密码(内置黑名单:12345678 / password / qwerty12 / admin123 等)
+4. 同一字符不连续重复 4 次以上(如 `1111abcd`)
+5. 不含 5 位以上连续字符(如 `12345`、`abcde`)
+
+页面会实时显示强度条与规则清单(逐条打勾),全部满足才能提交;**后端会二次校验**,绕过前端直接调接口同样会被拒,并返回具体原因。
+规则定义在 `app/services/auth_service.py` 的 `PASSWORD_RULES` / `password_issues()`,前端清单文案由接口下发,改规则只需改后端。
 
 ### 实现说明
 

@@ -1,143 +1,3 @@
-"""总结可视化页面(内建 HTML)。
-
-浏览器访问 GET /summary 即可查看:
-- 顶部切换对话
-- 展示对话主题标签 + LLM 总结文案
-- 完整对话按时间顺序平铺展示,不同问题之间用横杠分隔
-
-纯前端 JS fetch 后端接口,无构建依赖。浅色主题。
-"""
-
-SUMMARY_PAGE_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>群聊总结</title>
-<style>
-  :root{
-    --bg:#f5f6f8; --card:#ffffff; --border:#e3e6ea;
-    --text:#1f2329; --muted:#6b7280; --primary:#185fa5; --accent:#0f6e56;
-    --tag:#e6f1fb; --tagtext:#0c447c;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.6;padding:24px}
-  .wrap{max-width:860px;margin:0 auto}
-  h1{font-size:22px;font-weight:600;margin-bottom:4px}
-  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
-  .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
-  .bar select{padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:#fff;font-size:14px;min-width:280px}
-  .refresh{padding:8px 16px;border:none;border-radius:8px;background:var(--primary);color:#fff;cursor:pointer;font-size:14px}
-  .refresh:hover{opacity:.9}
-  .llm-status{font-size:12px;padding:4px 10px;border-radius:20px}
-  .llm-on{background:#e1f5ee;color:#085041}
-  .llm-off{background:#fcebeb;color:#791f1f}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
-  .topic{font-size:14px;display:inline-block;padding:4px 12px;background:var(--tag);color:var(--tagtext);border-radius:20px;margin-bottom:12px}
-  .summary-title{font-size:15px;font-weight:600;margin-bottom:8px}
-  .summary{font-size:14px;color:var(--text);white-space:pre-wrap;background:#fafbfc;border:1px solid var(--border);border-radius:8px;padding:12px}
-  .empty-note{color:var(--muted);font-size:13px}
-  .msg{margin:10px 0;padding:10px 12px;border-radius:8px;background:#fafbfc;border-left:3px solid var(--primary)}
-  .msg .who{font-size:12px;color:var(--muted);margin-bottom:2px}
-  .msg .who .mtime{margin-left:8px}
-  .chat-sep{display:flex;align-items:center;gap:10px;margin:18px 0 12px;color:var(--muted);font-size:12px}
-  .chat-sep::before,.chat-sep::after{content:"";flex:1;height:1px;background:#c9ced6}
-  .msg .body{font-size:14px;word-break:break-word}
-  .msg .msg-img{max-width:320px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;cursor:zoom-in;display:block}
-  .msg .msg-video{max-width:360px;max-height:320px;border-radius:8px;border:1px solid #e4e7eb;display:block;background:#000}
-  .msg .media-name{font-size:12px;color:var(--muted);margin-top:4px;word-break:break-all}
-  .msg .msg-file{display:inline-flex;align-items:center;gap:8px;max-width:100%;padding:8px 12px;border:1px solid var(--accent);border-radius:8px;background:#eaf3de;font-size:13px;word-break:break-all}
-  .msg .msg-file .fname{color:var(--text);font-weight:500}
-  .msg .msg-file a.dl{text-decoration:none;color:var(--primary);font-weight:500;white-space:nowrap}
-  .msg .msg-file a.dl:hover{text-decoration:underline}
-  .meta{font-size:12px;color:var(--muted);margin-top:12px}
-  .loading{color:var(--muted);font-size:14px;padding:20px 0}
-  .stats-overall{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-  .stat-chip{background:#fafbfc;border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:13px;color:var(--muted);min-width:88px}
-  .stat-chip b{color:var(--text);font-size:18px;display:block;line-height:1.3}
-  .topic-row{border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
-  .topic-head{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;background:#fff;flex-wrap:wrap}
-  .topic-head:hover{background:#f8fafc}
-  .topic-name{font-weight:600;font-size:14px}
-  .topic-stat{font-size:12px;color:var(--muted)}
-  .ai-badge{font-size:12px;padding:2px 10px;border-radius:20px;margin-left:auto}
-  .ai-ready{background:#e1f5ee;color:#085041}
-  .ai-stale{background:#fdf3e0;color:#7a4d05}
-  .ai-missing{background:#eceef1;color:#6b7280}
-  .topic-body{padding:12px 14px;border-top:1px solid var(--border);background:#fafbfc}
-  .ai-block{margin-bottom:10px}
-  .ai-block .k{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:2px}
-  .ai-block .v{font-size:14px;white-space:pre-wrap;word-break:break-word}
-  .status-badge{font-size:12px;padding:2px 10px;border-radius:20px;background:#fdf3e0;color:#7a4d05;margin-left:6px}
-  .status-done{background:#e1f5ee;color:#085041}
-  .gen-meta{font-size:12px;color:var(--muted);margin-top:8px}
-  .regen{padding:6px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;margin-top:6px}
-  .regen:hover{border-color:var(--primary);color:var(--primary)}
-  .media-gallery{display:flex;gap:12px;flex-wrap:wrap}
-  .media-item{display:inline-flex;flex-direction:column;gap:2px;align-items:center}
-  .media-thumb{max-width:180px;max-height:140px;border-radius:8px;border:1px solid #e4e7eb;background:#000;cursor:zoom-in}
-  .media-cap{font-size:11px;color:var(--muted)}
-  .media-filelink{font-size:13px;color:var(--primary);max-width:200px;word-break:break-all;text-decoration:none}
-  .media-filelink:hover{text-decoration:underline}
-  .group-row{border:2px solid var(--primary);background:#f2f7fd}
-  .group-head{background:#f2f7fd}
-  .group-head:hover{background:#e8f1fa}
-  .group-head .topic-name{color:var(--primary);font-size:15px}
-  .group-body{padding:10px 12px;border-top:1px solid var(--border);background:#fff}
-  .subgroup-row{border:1px solid var(--border);background:#f8fafc;margin:0 0 8px 10px}
-  .subgroup-head{background:#f8fafc}
-  .subgroup-head:hover{background:#eef3f9}
-  .subgroup-head .topic-name{color:var(--accent);font-size:14px}
-  .subgroup-body{background:#fbfcfd}
-  .sub-row{margin:0 0 8px 8px;border-left:3px solid var(--primary)}
-  .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--border)}
-  .tab{padding:8px 22px;border:none;background:none;font-size:15px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px}
-  .tab:hover{color:var(--text)}
-  .tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>飞书群消息</h1>
-  <div class="sub">对话查看 · 群聊总结(问题分类统计 + 每类问题 AI 分析)</div>
-
-  <div class="tabs">
-    <button class="tab active" id="tabBtn1" onclick="switchTab(1)">对话查看</button>
-    <button class="tab" id="tabBtn2" onclick="switchTab(2)">群聊总结</button>
-  </div>
-
-  <div id="tab1">
-    <div class="bar">
-      <select id="convSelect" onchange="loadSummary(this.value)"></select>
-      <button class="refresh" onclick="loadConversations()">刷新</button>
-      <span id="llmStatus" class="llm-status"></span>
-    </div>
-
-    <div class="card">
-      <div id="topicBox" class="topic" style="display:none"></div>
-      <div class="summary-title">LLM 总结</div>
-      <div id="summaryBox" class="empty-note">加载中…</div>
-    </div>
-
-    <div class="card">
-      <div class="summary-title">完整对话</div>
-      <div id="chatBox" class="empty-note">加载中…</div>
-      <div id="meta" class="meta"></div>
-    </div>
-  </div>
-
-  <div id="tab2" style="display:none">
-    <div class="card">
-      <div class="summary-title" style="display:flex;align-items:center;gap:12px">
-        问题分类统计
-        <button class="regen" style="margin-top:0" onclick="loadStats()">刷新</button>
-      </div>
-      <div id="statsBox" class="empty-note">加载中…</div>
-    </div>
-  </div>
-</div>
-
-<script>
 let convs = [];
 
 function shortId(id){return id ? String(id).slice(0,18)+'…' : '';}
@@ -198,85 +58,56 @@ async function loadSummary(id){
     else{boxS.className='empty-note';boxS.textContent = d.enabled?'(生成失败,请稍后重试)':'(未配置 LLM,无法生成总结文案;在服务器 config/.env 填 LLM_API_BASE/KEY/MODEL 后生效)';}
 
     boxC.className='';
-    boxC.innerHTML = renderTimeline(d.tree||[]) || '<span class="empty-note">该对话无消息内容</span>';
+    boxC.innerHTML = renderTree(d.tree||[], 0) || '<span class="empty-note">该对话无消息内容</span>';
     meta.textContent = '共 '+d.message_count+' 条消息 · 会话ID #'+d.conversation_id;
   }catch(e){
     boxS.textContent='请求失败: '+e; boxC.textContent='';
   }
 }
 
-function timeOf(m){
-  const t = Number(m && m.create_time);
-  return (isFinite(t) && t > 0) ? t : Number.MAX_SAFE_INTEGER;
-}
-
-// 把回复树拍平成消息列表,并按时间升序排序(完整对话按时间顺序展示)
-function flattenTree(nodes){
-  const out = [];
-  const walk = ns => {
-    for(const n of (ns||[])){
-      if(n.message) out.push(n.message);
-      if(n.children && n.children.length) walk(n.children);
+function renderTree(nodes, depth){
+  let html='';
+  for(const n of nodes){
+    const m=n.message;
+    if(m){
+      const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
+      let bodyHtml;
+      if(m.message_type === 'media'){
+        // 视频消息
+        if(m.file_url){
+          bodyHtml = '<video class="msg-video" src="'+esc(m.file_url)+'" controls preload="metadata"'
+                   + (m.image_url ? ' poster="'+esc(m.image_url)+'"' : '') + '></video>'
+                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+        } else if(m.image_url){
+          bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[视频封面]" onclick="window.open(this.src)">'
+                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+        } else {
+          bodyHtml = '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
+        }
+      } else if(m.message_type === 'file'){
+        // 普通文件消息:展示可下载的文件卡片
+        if(m.file_url){
+          bodyHtml = '<span class="msg-file"><span class="fname">'+esc(m.file_name || '文件')+'</span>'
+                   + '<a class="dl" href="'+esc(m.file_url)+'" target="_blank" rel="noopener" download>下载</a></span>';
+        } else {
+          bodyHtml = '<span class="empty-note">[文件(未落盘 '+esc(m.file_name||m.file_key||'')+')]</span>';
+        }
+      } else if(m.image_url){
+        // 图片消息:展示七牛图片
+        bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
+      } else if(m.message_type === 'image'){
+        // 图片但未落盘(未配置七牛/下载失败):占位提示
+        bodyHtml = '<span class="empty-note">[图片(未落盘 '+(m.image_key||'')+')]</span>';
+      } else {
+        bodyHtml = esc(renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')');
+      }
+      html += '<div class="msg indent-'+Math.min(depth,4)+'">'
+            + '<div class="who">'+esc(who)+'</div>'
+            + '<div class="body">'+bodyHtml+'</div></div>';
     }
-  };
-  walk(nodes);
-  out.sort((a,b) => timeOf(a) - timeOf(b));
-  return out;
-}
-
-// 两个问题块之间是否需要横杠分隔:后端已对「带已有标签的新消息并入对话」的首条消息
-// 打上 block_start=1,前端在该消息前画横杠
-function isSep(m){
-  return m.block_start === 1 || m.block_start === true;
-}
-
-// 单条消息的正文(文本/图片/视频/文件)
-function msgBodyHtml(m){
-  if(m.message_type === 'media'){
-    // 视频消息
-    if(m.file_url){
-      return '<video class="msg-video" src="'+esc(m.file_url)+'" controls preload="metadata"'
-           + (m.image_url ? ' poster="'+esc(m.image_url)+'"' : '') + '></video>'
-           + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
-    } else if(m.image_url){
-      return '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[视频封面]" onclick="window.open(this.src)">'
-           + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
-    } else {
-      return '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
+    if(n.children && n.children.length){
+      html += renderTree(n.children, depth+1);
     }
-  } else if(m.message_type === 'file'){
-    // 普通文件消息:展示可下载的文件卡片
-    if(m.file_url){
-      return '<span class="msg-file"><span class="fname">'+esc(m.file_name || '文件')+'</span>'
-           + '<a class="dl" href="'+esc(m.file_url)+'" target="_blank" rel="noopener" download>下载</a></span>';
-    } else {
-      return '<span class="empty-note">[文件(未落盘 '+esc(m.file_name||m.file_key||'')+')]</span>';
-    }
-  } else if(m.image_url){
-    // 图片消息:展示七牛图片
-    return '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
-  } else if(m.message_type === 'image'){
-    // 图片但未落盘(未配置七牛/下载失败):占位提示
-    return '<span class="empty-note">[图片(未落盘 '+(m.image_key||'')+')]</span>';
-  } else {
-    return esc(renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')');
-  }
-}
-
-// 完整对话:按时间顺序平铺,新问题块(block_start=1)前用横杠分隔
-function renderTimeline(tree){
-  const msgs = flattenTree(tree);
-  if(!msgs.length) return '';
-  let html = '';
-  for(let i=0; i<msgs.length; i++){
-    const m = msgs[i];
-    if(i > 0 && isSep(m)){
-      html += '<div class="chat-sep"><span>'+esc(fmtMs(m.create_time))+'</span></div>';
-    }
-    const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
-    html += '<div class="msg">'
-          + '<div class="who">'+esc(who)+'<span class="mtime">'+esc(fmtMs(m.create_time))+'</span></div>'
-          + '<div class="body">'+msgBodyHtml(m)+'</div></div>';
   }
   return html;
 }
@@ -512,7 +343,3 @@ function switchTab(n){
 }
 
 window.addEventListener('DOMContentLoaded', loadConversations);
-</script>
-</body>
-</html>
-"""

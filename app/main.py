@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
-from app.core.config import get_settings
+from app.core.config import STATIC_DIR, get_settings
 from app.core.db import SessionLocal, init_db
 from app.core.logging import setup_logging
 from app.services.feishu_handler import build_dispatcher
@@ -80,6 +81,14 @@ def create_app() -> FastAPI:
 
     # 把 dispatcher 挂到路由模块(工厂内提前初始化,保证路由可用)
     routes_module.dispatcher = _dispatcher()
+
+    # 前端静态资源(CSS / JS);认证中间件对 /static/ 放行
+    if STATIC_DIR.is_dir():
+        app.mount(
+            "/static",
+            StaticFiles(directory=str(STATIC_DIR)),
+            name="static",
+        )
 
     # 登录注册页与认证接口(需在业务路由之前注册)
     from app.api import auth as auth_module

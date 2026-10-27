@@ -21,16 +21,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from lark_oapi.core.const import UTF_8
 from lark_oapi.core.model import RawRequest, RawResponse
 
-from app.api.summary_page import SUMMARY_PAGE_HTML
-from app.api.habits_page import HABITS_PAGE_HTML
-from app.core.config import get_settings
+from app.core.config import STATIC_DIR, get_settings
 from app.core.db import check_db_connection, get_session
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
@@ -146,10 +144,8 @@ def message_topics(
 
 @router.get("/summary", response_class=HTMLResponse)
 def summary_page() -> HTMLResponse:
-    """总结可视化页面(内建 HTML,浏览器直接访问)。"""
-    from app.api.auth import with_logout_button
-
-    return HTMLResponse(content=with_logout_button(SUMMARY_PAGE_HTML))
+    """群聊总结可视化页面(app/static/summary.html)。"""
+    return _page("summary.html")
 
 
 @router.get("/api/topics")
@@ -422,10 +418,17 @@ def api_topic_knowledge_delete(topic: str, db: Session = Depends(get_session)) -
 
 @router.get("/habits", response_class=HTMLResponse)
 def habits_page() -> HTMLResponse:
-    """对话习惯可视化页面(内建 HTML,浏览器直接访问)。"""
-    from app.api.auth import with_logout_button
+    """对话习惯可视化页面(app/static/habits.html)。"""
+    return _page("habits.html")
 
-    return HTMLResponse(content=with_logout_button(HABITS_PAGE_HTML))
+
+def _page(filename: str) -> HTMLResponse:
+    """返回 app/static/ 下的页面文件(顶部导航由 static/nav.js 统一渲染)。"""
+    page = STATIC_DIR / filename
+    if not page.is_file():
+        logger.error("页面静态文件缺失: %s", page)
+        raise HTTPException(status_code=500, detail="页面资源缺失")
+    return FileResponse(page, media_type="text/html; charset=utf-8")
 
 
 @router.get("/api/habits")

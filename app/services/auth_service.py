@@ -44,9 +44,80 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_.\-一-龥]{3,32}$")
 MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 128
 
+# 密码复杂度规则(注册 / 改密时校验;历史密码登录不受影响)
+# 1) 长度 8~128  2) 同时含字母与数字  3) 非常见弱密码
+# 4) 同一字符不连续重复 4 次以上  5) 不含 5 位以上连续顺子(12345 / abcde)
+PASSWORD_RULES = (
+    f"长度为 {MIN_PASSWORD_LEN}~{MAX_PASSWORD_LEN} 位",
+    "同时包含字母和数字",
+    "不能是常见弱密码(如 12345678、password)",
+    "同一字符不连续重复 4 次以上",
+    "不含 5 位以上连续字符(如 12345、abcde)",
+)
+
+# 常见弱密码黑名单(小写比对)
+_WEAK_PASSWORDS = {
+    "12345678", "123456789", "1234567890", "87654321", "11111111", "00000000",
+    "password", "passw0rd", "password1", "abc12345", "abcd1234", "a1234567",
+    "qwerty12", "qwerty123", "iloveyou", "admin123", "administrator",
+    "letmein", "welcome1", "test1234", "user1234", "feishu123", "woaini1314",
+}
+
 # 登录失败限流
 _MAX_FAILS = 5
 _FAIL_WINDOW_SEC = 300
+
+
+def _has_long_sequence(pwd: str) -> bool:
+    """是否含 5 位以上连续顺子(递增或递减,如 abcde / 54321)。"""
+    run_up = run_down = 1
+    for i in range(1, len(pwd)):
+        delta = ord(pwd[i]) - ord(pwd[i - 1])
+        run_up = run_up + 1 if delta == 1 else 1
+        run_down = run_down + 1 if delta == -1 else 1
+        if run_up >= 5 or run_down >= 5:
+            return True
+    return False
+
+
+def password_issues(password: str) -> list[str]:
+    """返回密码不满足的规则列表;全部满足时返回空列表。
+
+    供后端校验与(未来的)强度提示复用,保证前后端口径一致。
+    """
+    pwd = password or ""
+    issues: list[str] = []
+    if len(pwd) < MIN_PASSWORD_LEN:
+        issues.append(f"至少 {MIN_PASSWORD_LEN} 位")
+    if len(pwd) > MAX_PASSWORD_LEN:
+        issues.append(f"最多 {MAX_PASSWORD_LEN} 位")
+    if pwd and not re.search(r"[A-Za-z]", pwd):
+        issues.append("需包含字母")
+    if pwd and not re.search(r"\d", pwd):
+        issues.append("需包含数字")
+    if pwd.lower() in _WEAK_PASSWORDS:
+        issues.append("这是常见弱密码,请换一个")
+    if re.search(r"(.)\1{3,}", pwd):
+        issues.append("同一字符不能连续重复 4 次以上")
+    if _has_long_sequence(pwd):
+        issues.append("不能包含 5 位以上连续字符(如 12345、abcde)")
+    return issues
+
+
+def password_strength(password: str) -> int:
+    """密码强度评分 0~3(弱/中/强/很强),仅用于页面展示。"""
+    pwd = password or ""
+    if not pwd or password_issues(pwd):
+        return 0
+    score = 1
+    if len(pwd) >= 12:
+        score += 1
+    # 大小写混合 / 含符号 / 字符种类丰富各加一档(取一次)
+    if re.search(r"[a-z]", pwd) and re.search(r"[A-Z]", pwd):
+        score += 1
+    elif re.search(r"[^A-Za-z0-9]", pwd):
+        score += 1
+    return min(score, 3)
 
 
 # ---------------------------------------------------------------- 密码摘要
@@ -87,13 +158,11 @@ def validate_username(username: str) -> str:
 
 
 def validate_password(password: str) -> str:
-    """校验密码强度(当前只约束长度)。不合法抛 ValueError。"""
-    pwd = password or ""
-    if len(pwd) < MIN_PASSWORD_LEN:
-        raise ValueError(f"密码至少 {MIN_PASSWORD_LEN} 位")
-    if len(pwd) > MAX_PASSWORD_LEN:
-        raise ValueError(f"密码最长 {MAX_PASSWORD_LEN} 位")
-    return pwd
+    """校验密码复杂度。不合法抛 ValueError(带上具体不满足的规则)。"""
+    issues = password_issues(password)
+    if issues:
+        raise ValueError("密码不满足要求:" + "、".join(issues))
+    return password or ""
 
 
 # ---------------------------------------------------------------- 账号 CRUD

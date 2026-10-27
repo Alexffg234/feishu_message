@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="description" content="飞书群聊知识库 - 登录与注册">
+<meta name="color-scheme" content="dark">
+<title>登录 · 飞书群聊知识库</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b8ede'/%3E%3Cpath d='M9 12h14M9 17h9' stroke='white' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/components.css?v=1.0.0">
+<link rel="stylesheet" href="/static/login.css?v=1.0.0">
+</head>
+<body>
+
+<div class="orb orb--blue" aria-hidden="true"></div>
+<div class="orb orb--teal" aria-hidden="true"></div>
+
+<header class="brand-mobile">
+  <span class="brand-mobile__mark">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 7h16M4 12h11" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+    </svg>
+  </span>
+  <span class="brand-mobile__name">飞书群聊知识库</span>
+</header>
+
+<main class="shell">
+
+  <aside class="brand">
+    <div class="brand__logo">
+      <span class="brand__mark">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 7h16M4 12h11" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <span class="brand__name">飞书群聊知识库</span>
+    </div>
+
+    <div class="brand__body">
+      <h1 class="brand__title">把群聊沉淀成<br>可检索的问题库</h1>
+      <p class="brand__sub">自动采集群消息，还原回复链，归纳问题主题并生成排查与解决建议。</p>
+      <ul class="brand__list">
+        <li class="brand__item">
+          <span class="brand__check"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6.2 4.8 9 10 3.4" stroke="#3fc79a" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span>实时采集机器人所在群的全部消息</span>
+        </li>
+        <li class="brand__item">
+          <span class="brand__check"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6.2 4.8 9 10 3.4" stroke="#3fc79a" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span>回复链还原成完整对话树</span>
+        </li>
+        <li class="brand__item">
+          <span class="brand__check"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6.2 4.8 9 10 3.4" stroke="#3fc79a" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span>按主题聚合并生成 AI 分析</span>
+        </li>
+      </ul>
+    </div>
+
+    <p class="brand__foot">FEISHU GROUP MESSAGE CAPTURE</p>
+  </aside>
+
+  <section class="panel">
+    <div class="tabs" role="tablist" aria-label="登录或注册">
+      <button class="tabs__btn is-active" id="tab-login" type="button" role="tab" aria-selected="true" aria-controls="form-login">登录</button>
+      <button class="tabs__btn" id="tab-register" type="button" role="tab" aria-selected="false" aria-controls="form-register">注册</button>
+      <span class="tabs__indicator" id="tab-indicator" aria-hidden="true"></span>
+    </div>
+
+    <div class="alert" id="alert" role="alert" aria-live="assertive" hidden>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M8 4.6v4.2M8 11.2v.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span id="alert-text"></span>
+    </div>
+
+    <h2 class="panel__title" id="panel-title">欢迎回来</h2>
+    <p class="panel__desc" id="panel-desc">登录后查看群聊对话与总结。</p>
+
+    <form class="form" id="form-login" autocomplete="on" novalidate aria-labelledby="panel-title">
+      <div class="field">
+        <label class="field__label" for="login-user">用户名</label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="5.4" r="2.9" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M2.6 13.6c.7-2.5 2.8-3.9 5.4-3.9s4.7 1.4 5.4 3.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <input class="field__input" id="login-user" name="username" type="text"
+                 autocomplete="username" placeholder="请输入用户名"
+                 aria-describedby="err-login-user" required>
+        </div>
+        <p class="field__error" id="err-login-user" hidden></p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="login-pass">密码</label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <rect x="3" y="7" width="10" height="7" rx="1.8" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <input class="field__input field__input--toggle" id="login-pass" name="password" type="password"
+                 autocomplete="current-password" placeholder="请输入密码"
+                 aria-describedby="err-login-pass" required>
+          <button class="field__toggle" type="button" data-toggle="login-pass"
+                  aria-label="显示密码" aria-pressed="false">
+            <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <path d="M1.8 9S4.6 4.4 9 4.4 16.2 9 16.2 9 13.4 13.6 9 13.6 1.8 9 1.8 9Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              <circle cx="9" cy="9" r="2.1" stroke="currentColor" stroke-width="1.4"/>
+            </svg>
+          </button>
+        </div>
+        <p class="field__error" id="err-login-pass" hidden></p>
+      </div>
+
+      <button class="btn" id="btn-login" type="submit"><span class="btn__label">登录</span></button>
+    </form>
+
+    <form class="form" id="form-register" autocomplete="on" novalidate hidden aria-labelledby="panel-title">
+      <div class="field">
+        <label class="field__label" for="reg-user">用户名</label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="5.4" r="2.9" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M2.6 13.6c.7-2.5 2.8-3.9 5.4-3.9s4.7 1.4 5.4 3.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <input class="field__input" id="reg-user" name="username" type="text"
+                 autocomplete="username" placeholder="3~32 位字母、数字或中文"
+                 aria-describedby="hint-reg-user err-reg-user" required>
+        </div>
+        <p class="field__hint" id="hint-reg-user">用于登录，创建后不可修改</p>
+        <p class="field__error" id="err-reg-user" hidden></p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="reg-name">昵称<span class="field__opt">（选填）</span></label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 4.8v3.4l2.3 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <input class="field__input" id="reg-name" name="display_name" type="text"
+                 placeholder="展示用名称，留空同用户名">
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="reg-pass">密码</label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <rect x="3" y="7" width="10" height="7" rx="1.8" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <input class="field__input field__input--toggle" id="reg-pass" name="password" type="password"
+                 autocomplete="new-password" placeholder="请设置符合要求的密码"
+                 aria-describedby="strength err-reg-pass" required>
+          <button class="field__toggle" type="button" data-toggle="reg-pass"
+                  aria-label="显示密码" aria-pressed="false">
+            <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <path d="M1.8 9S4.6 4.4 9 4.4 16.2 9 16.2 9 13.4 13.6 9 13.6 1.8 9 1.8 9Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              <circle cx="9" cy="9" r="2.1" stroke="currentColor" stroke-width="1.4"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="strength" id="strength" hidden>
+          <div class="strength__track" id="strength-bar" role="presentation">
+            <span class="strength__seg"></span><span class="strength__seg"></span><span class="strength__seg"></span>
+          </div>
+          <p class="strength__text">
+            <span>密码强度 <b class="strength__label" id="strength-label">弱</b></span>
+            <span class="strength__tip" id="strength-tip"></span>
+          </p>
+        </div>
+
+        <ul class="rules" id="rules" aria-label="密码要求"></ul>
+        <p class="field__error" id="err-reg-pass" hidden></p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="reg-pass2">确认密码</label>
+        <div class="field__control">
+          <span class="field__lead" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <rect x="3" y="7" width="10" height="7" rx="1.8" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <input class="field__input" id="reg-pass2" type="password"
+                 autocomplete="new-password" placeholder="再次输入密码"
+                 aria-describedby="err-reg-pass2" required>
+        </div>
+        <p class="field__error" id="err-reg-pass2" hidden></p>
+      </div>
+
+      <button class="btn" id="btn-register" type="submit" disabled><span class="btn__label">注册</span></button>
+    </form>
+
+    <p class="switch" id="switch-row">
+      <span id="switch-text">还没有账号？</span>
+      <button class="switch__btn" id="switch-btn" type="button">立即注册</button>
+    </p>
+    <p class="note" id="note"></p>
+  </section>
+
+</main>
+
+<script src="/static/login.js?v=1.0.0" defer></script>
+</body>
+</html>

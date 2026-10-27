@@ -21,6 +21,7 @@ feishu_message/
 │   └── .env.example        # 配置模板(复制为 .env)
 ├── scripts/
 │   ├── init_db.py                  # 初始化数据库(含对话表)
+│   ├── create_user.py              # 命令行创建/改密/停用账号
 │   ├── query_messages.py           # 查看/导出/分组查询已采集消息
 │   ├── backfill_conversations.py   # 存量消息回填成对话关系(幂等)
 │   ├── query_conversations.py      # 查询对话/回复树
@@ -30,13 +31,15 @@ feishu_message/
 │   ├── move_messages.py            # 把某对话时间窗内消息挪入另一对话
 │   └── backfill_block_start.py     # 存量对话回填新问题块起点(横杠)标记
 └── app/
-    ├── main.py             # FastAPI 应用工厂
+    ├── main.py             # FastAPI 应用工厂(含访问控制中间件装配)
     ├── api/routes.py       # HTTP 路由(事件回调 + 查询接口)
+    ├── api/auth.py         # 登录注册接口 + 全站访问控制中间件
+    ├── api/login_page.py   # 登录/注册页(内建 HTML)
     ├── core/               # 配置 / 数据库 / 日志
-    ├── models/             # ORM 模型(message / conversation / message_link)
+    ├── models/             # ORM 模型(message / conversation / user ...)
     ├── schemas/message.py  # Pydantic schema
     ├── dao/                # 数据访问层(message / conversation_repo)
-    └── services/           # 事件处理 / 业务逻辑(含分组、主题)
+    └── services/           # 事件处理 / 业务逻辑(含分组、主题、认证)
 ```
 
 ## 对话关系存储
@@ -65,6 +68,45 @@ python scripts/query_conversations.py --tree <id>      # 某对话的完整回�
 - `GET /api/summary/{conversation_id}`：某对话详情 + LLM 总结 + 回复树
 
 > 页面需配置 `LLM_API_KEY / LLM_MODEL` 才会出现总结文案;未配置时显示占位并正常展示回复树。
+
+## 访问控制(登录注册)
+
+默认开启全站登录校验:**未登录不能访问任何页面或接口**。
+
+- 页面 `GET /summary`、`/habits`:未登录 302 跳转到 `/login?next=原路径`
+- 接口 `GET /api/*`:未登录返回 401 JSON
+- **飞书事件回调 `/feishu/event` 始终放行**(无 cookie,拦截会导致消息采集中断)
+- `/login`、`/api/auth/*`、`/health`、`/ready` 放行
+
+### 首次使用
+
+启动后访问 `http://<host>:8008/login`,注册**首个账号自动成为管理员**。也可以先用命令行开号:
+
+```bash
+python scripts/create_user.py admin 你的密码          # 创建(首个账号=admin)
+python scripts/create_user.py admin --reset-pwd 新密码 # 改密
+python scripts/create_user.py someone --disable        # 停用(保留数据,禁止登录)
+python scripts/create_user.py --list                   # 查看全部账号
+```
+
+登录后页面右上角有「退出登录」入口,或直接访问 `GET /logout`。
+
+### 相关配置(config/.env)
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AUTH_ENABLED` | `true` | 关闭即全站免登录(仅本地调试,生产勿关) |
+| `ALLOW_PUBLIC_REGISTER` | `true` | 关 false 后只能用 `create_user.py` 开号;**库里无账号时注册恒开放**,否则无法创建首个管理员 |
+| `SESSION_TTL_HOURS` | `12` | 登录态有效期 |
+| `SESSION_SECRET` | 空 | 会话签名密钥;留空自动生成并持久化到 `data/.session_secret`。**多实例部署必须显式配成同一个值** |
+| `COOKIE_SECURE` | `false` | 站点为 https 时必须置 `true` |
+
+### 实现说明
+
+- 零新增依赖:密码用标准库 `hashlib.pbkdf2_hmac`(SHA256 + 每账号随机盐,20 万轮),会话用 HMAC-SHA256 签名 cookie
+- 会话无状态(不建 sessions 表),登出即清 cookie;密钥落 `data/.session_secret`,重启后不会强制下线
+- 登录失败提示不区分「用户名不存在」与「密码错误」;同一账号连续失败 5 次冷却 5 分钟(进程内计数,更强的防护请放在 nginx/网关层)
+- 密码只存摘要,库里无明文
 
 ## 消息资源(图片/视频/文件 → 七牛对象存储)
 
@@ -314,9 +356,14 @@ GET /health -> {"status":"ok"}
 - **收到事件但无消息入库**：确认机器人已被拉入该群，且应用权限被管理员审批通过。
 - **回调地址校验失败**：飞书会先发一个 URL 校验请求（`challenge`），SDK 已自动处理；确认请求地址与 `event_path` 完全一致（`/feishu/event`）。
 - **只想要特定群**：在 `.env` 填写 `ALLOWED_CHAT_IDS=oc_xxx,oc_yyy`。
+- **忘记密码**：`python scripts/create_user.py 用户名 --reset-pwd 新密码`
+- **页面显示「自助注册已关闭」**：库里已有账号且 `ALLOW_PUBLIC_REGISTER=false`,用 `create_user.py` 开号。
+- **登录成功仍跳回登录页**：站点是 https 但 `COOKIE_SECURE=false`,浏览器不会回传 cookie。
+- **多实例部署反复掉线**：各实例 `SESSION_SECRET` 不一致,配成同一个值。
 
 ## 安全
 
 - `config/.env` 含敏感凭据，已加入 `.gitignore`，**不要提交到仓库**。
 - 消息内容未经加密直接落盘，注意存储权限。
+- 全站默认要求登录（见「访问控制」）；`data/.session_secret` 是会话签名密钥，**泄露即可伪造任意用户的登录态**，须与 `.env` 同等对待（`data/` 已忽略）。
 # feishu_message

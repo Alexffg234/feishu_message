@@ -11,6 +11,7 @@ from app.models.topic_summary import TopicSummary  # noqa: F401
 from app.models.topic_group import TopicGroup  # noqa: F401
 from app.models.topic_knowledge import TopicKnowledge  # noqa: F401
 from app.models.app_lock import SchedulerLock  # noqa: F401
+from app.models.user import User  # noqa: F401
 
 __all__ = [
     "Base",
@@ -23,4 +24,5 @@ __all__ = [
     "TopicGroup",
     "TopicKnowledge",
     "SchedulerLock",
+    "User",
 ]

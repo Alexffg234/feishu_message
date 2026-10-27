@@ -147,7 +147,9 @@ def message_topics(
 @router.get("/summary", response_class=HTMLResponse)
 def summary_page() -> HTMLResponse:
     """总结可视化页面(内建 HTML,浏览器直接访问)。"""
-    return HTMLResponse(content=SUMMARY_PAGE_HTML)
+    from app.api.auth import with_logout_button
+
+    return HTMLResponse(content=with_logout_button(SUMMARY_PAGE_HTML))
 
 
 @router.get("/api/topics")
@@ -421,7 +423,9 @@ def api_topic_knowledge_delete(topic: str, db: Session = Depends(get_session)) -
 @router.get("/habits", response_class=HTMLResponse)
 def habits_page() -> HTMLResponse:
     """对话习惯可视化页面(内建 HTML,浏览器直接访问)。"""
-    return HTMLResponse(content=HABITS_PAGE_HTML)
+    from app.api.auth import with_logout_button
+
+    return HTMLResponse(content=with_logout_button(HABITS_PAGE_HTML))
 
 
 @router.get("/api/habits")

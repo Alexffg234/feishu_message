@@ -51,10 +51,12 @@ def merge_groups(
     source_root: str,
     target_root: str,
     topic: str = "",
+    mark_block_start: bool = True,
 ) -> bool:
     """把 source 组整体并入 target 组,返回是否发生归并。
 
     source/target 任一组无数据、或两者相同,返回 False(幂等)。
+    mark_block_start=False 时不打新问题块起点标记(多对话实为同一案例时使用)。
     """
     if not source_root or not target_root or source_root == target_root:
         return False
@@ -84,7 +86,7 @@ def merge_groups(
             m.conversation_id = target_conv.id
         # 1b) 新消息带着已有标签并入既有对话 → 标记新问题块起点(首条消息),
         #     前端在完整对话里于该消息前画横杠;无标签(空)不标记
-        if any((m.topic or "").strip() for m in source_rows):
+        if mark_block_start and any((m.topic or "").strip() for m in source_rows):
             first_row = min(
                 source_rows,
                 key=lambda r: (

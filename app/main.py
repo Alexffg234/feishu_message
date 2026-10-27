@@ -45,12 +45,15 @@ async def lifespan(app: FastAPI):
         logger.exception("init_db 失败(数据库可能未就绪)")
     # 主题 AI 总结后台调度(建表后再启,租约锁表依赖 create_all)
     from app.services.topic_summary_service import get_topic_summary_service
+    from app.services.conv_stitch_service import get_conv_stitch_service
 
     get_topic_summary_service().start()
+    get_conv_stitch_service().start()
     logger.info("服务启动完成 host=%s port=%s db=%s",
                 settings.host, settings.port, settings.database_url)
     yield
     # 应用关闭(优雅):停后台调度 + 排空事件队列,处理完在途事件再退出
+    get_conv_stitch_service().stop()
     get_topic_summary_service().stop()
     get_event_queue().stop(drain=True)
     logger.info("服务已关闭")

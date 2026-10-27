@@ -192,7 +192,12 @@ def stitch_chat(
     chat_id: str,
     llm,
 ) -> list[tuple[int, int]]:
-    """执行会话缝合,返回实际合并的 (源会话id, 目标会话id) 列表。"""
+    """执行会话缝合,返回实际合并的 (源会话id, 目标会话id) 列表。
+
+    缝合语义 = 同一问题处理生命周期的续聊(护栏保证 <6 小时),
+    视为同一问题不断句:不打新问题块起点标记,前端不画横杠。
+    (不同案例靠同标签归并 merge_topic_group 路径,那里保留横杠标记。)
+    """
     done: list[tuple[int, int]] = []
     for src_id, tgt_id in plan_stitches(session, chat_id, llm):
         src = session.get(Conversation, src_id)
@@ -200,7 +205,8 @@ def stitch_chat(
         if src is None or tgt is None:
             continue
         if merge_groups(
-            session, chat_id, src.root_message_id, tgt.root_message_id, tgt.topic or ""
+            session, chat_id, src.root_message_id, tgt.root_message_id,
+            tgt.topic or "", mark_block_start=False,
         ):
             done.append((src_id, tgt_id))
     return done

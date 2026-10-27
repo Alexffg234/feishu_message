@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     # False = 只打标签不归并。
     topic_merge_enabled: bool = True
 
+    # ---------- 会话缝合(后台周期 LLM 判定同一案例续聊) ----------
+    # 标准标签只归类不合并,同一案例的后续会话由本调度自动缝合合并
+    # (LLM 判定「同一问题处理生命周期」,护栏:时间间隙<6h、标签不冲突)。
+    # 缝合并入的续聊视为同一问题不断句(不画横杠)。
+    # False 或 0 = 禁用后台调度(仅手动脚本 scripts/stitch_conversations.py)。
+    conv_stitch_enabled: bool = True
+    conv_stitch_interval_minutes: int = 30
+
     # ---------- 主题 AI 总结(后台定时全量预生成) ----------
     # 每 N 分钟扫一遍全部 topic,指纹(消息数/最大消息 id)变化的重新生成 AI 分析。
     # 0 = 禁用后台定时(仅手动 POST 触发)。

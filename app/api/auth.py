@@ -23,12 +23,16 @@ import logging
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.login_page import LOGIN_PAGE_HTML
-from app.core.config import get_settings
+from app.core.config import STATIC_DIR, get_settings
 from app.core.db import SessionLocal, get_session
 from app.models.user import User
 from app.services import auth_service
@@ -94,16 +98,29 @@ def resolve_user_from_request(request: Request, db: Session) -> User | None:
 # ---------------------------------------------------------------- 页面
 @router.get("/login", response_class=HTMLResponse)
 def login_page() -> HTMLResponse:
-    return HTMLResponse(content=LOGIN_PAGE_HTML)
+    """登录/注册页。静态文件在 app/static/,便于浏览器缓存与独立维护。"""
+    page = STATIC_DIR / "login.html"
+    if not page.is_file():
+        logger.error("登录页静态文件缺失: %s", page)
+        raise HTTPException(status_code=500, detail="登录页资源缺失")
+    return FileResponse(page, media_type="text/html; charset=utf-8")
 
 
 # ---------------------------------------------------------------- 接口
 @router.get("/api/auth/register")
 def register_status(db: Session = Depends(get_session)) -> dict:
-    """自助注册是否开放。库里无账号时恒为开放(否则无法创建首个管理员)。"""
+    """自助注册是否开放 + 密码复杂度规则(供页面渲染规则清单,保证前后端口径一致)。
+
+    库里无账号时恒为开放(否则无法创建首个管理员)。
+    """
     settings = get_settings()
     empty = auth_service.count_users(db) == 0
-    return {"open": bool(settings.allow_public_register or empty)}
+    return {
+        "open": bool(settings.allow_public_register or empty),
+        "password_rules": list(auth_service.PASSWORD_RULES),
+        "min_len": auth_service.MIN_PASSWORD_LEN,
+        "max_len": auth_service.MAX_PASSWORD_LEN,
+    }
 
 
 @router.post("/api/auth/register")
@@ -202,7 +219,12 @@ def install_auth_middleware(app) -> None:
             return await call_next(request)
 
         path = request.url.path
-        if path in _public_paths() or path.startswith("/api/auth/"):
+        # 白名单:登录页/登出/认证接口/健康检查/飞书回调/静态资源(CSS·JS)
+        if (
+            path in _public_paths()
+            or path.startswith("/api/auth/")
+            or path.startswith("/static/")
+        ):
             return await call_next(request)
 
         token = request.cookies.get(auth_service.COOKIE_NAME)
@@ -228,36 +250,3 @@ def install_auth_middleware(app) -> None:
         return RedirectResponse(url=target, status_code=302)
 
 
-# ---------------------------------------------------------------- 页面增强
-_LOGOUT_SNIPPET = """
-<div id="__authbar" style="position:fixed;top:16px;right:20px;z-index:9999;display:flex;
-  align-items:center;gap:10px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">
-  <span id="__authuser" style="font-size:12.5px;color:#6b7280"></span>
-  <button id="__logout" type="button" style="padding:6px 14px;font-size:13px;cursor:pointer;
-    border:1px solid #e3e6ea;border-radius:8px;background:#fff;color:#185fa5">退出登录</button>
-</div>
-<script>
-(function(){
-  var bar=document.getElementById('__authbar');
-  fetch('/api/auth/me').then(function(r){return r.ok?r.json():null}).then(function(u){
-    if(!u){bar.style.display='none';return;}
-    document.getElementById('__authuser').textContent=u.display_name||u.username;
-  }).catch(function(){bar.style.display='none'});
-  document.getElementById('__logout').onclick=function(){
-    fetch('/api/auth/logout',{method:'POST'}).then(function(){location.assign('/login');});
-  };
-})();
-</script>
-"""
-
-
-def with_logout_button(html: str) -> str:
-    """在现有页面 HTML 末尾注入右上角「退出登录」入口。
-
-    避免改动 summary_page / habits_page 源文件;AUTH_ENABLED=false 时原样返回。
-    """
-    if not get_settings().auth_enabled:
-        return html
-    if "</body>" in html:
-        return html.replace("</body>", _LOGOUT_SNIPPET + "</body>", 1)
-    return html + _LOGOUT_SNIPPET

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>群聊总结</title>
+<link rel="stylesheet" href="/static/components.css?v=1.0.0">
+<link rel="stylesheet" href="/static/summary.css?v=1.0.0">
+
+</head>
+<body>
+<div id="app-nav"></div>
+<div class="wrap">
+  <h1 class="page-title">飞书群消息</h1>
+  <div class="page-sub">对话查看 · 群聊总结(问题分类统计 + 每类问题 AI 分析)</div>
+
+  <div class="tabs">
+    <button class="tab active" id="tabBtn1" onclick="switchTab(1)">对话查看</button>
+    <button class="tab" id="tabBtn2" onclick="switchTab(2)">群聊总结</button>
+  </div>
+
+  <div id="tab1">
+    <div class="bar">
+      <select id="convSelect" onchange="loadSummary(this.value)"></select>
+      <button class="refresh" onclick="loadConversations()">刷新</button>
+      <span id="llmStatus" class="llm-status"></span>
+    </div>
+
+    <div class="card">
+      <div id="topicBox" class="topic" style="display:none"></div>
+      <div class="summary-title">LLM 总结</div>
+      <div id="summaryBox" class="empty-note">加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="summary-title">完整对话</div>
+      <div id="chatBox" class="empty-note">加载中…</div>
+      <div id="meta" class="meta"></div>
+    </div>
+  </div>
+
+  <div id="tab2" style="display:none">
+    <div class="card">
+      <div class="summary-title" style="display:flex;align-items:center;gap:12px">
+        问题分类统计
+        <button class="regen" style="margin-top:0" onclick="loadStats()">刷新</button>
+      </div>
+      <div id="statsBox" class="empty-note">加载中…</div>
+    </div>
+  </div>
+</div>
+
+
+<script src="/static/nav.js?v=1.0.0" defer></script>
+<script src="/static/summary.js?v=1.0.0" defer></script>
+</body>
+</html>

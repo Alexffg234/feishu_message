@@ -1,0 +1,363 @@
+/* ==========================================================================
+   飞书群聊知识库 · 公共设计令牌与组件层
+   全站唯一令牌来源。页面专属样式(login.css / summary.css / habits.css)
+   必须在本文件之后引入,并复用这里的变量,不得重复定义 :root。
+
+   目录
+   1. 设计令牌(颜色 / 圆角 / 动效)
+   2. 兼容别名(旧页面使用的 --bg / --card / --border 等)
+   3. 基础排版
+   4. 顶部导航(app-nav)
+   5. 通用组件(卡片 / 按钮 / 下拉 / 徽章 / 空态 / 加载)
+   6. 响应式与降级
+   ========================================================================== */
+
+/* --------------------------------------------------------- 1. 设计令牌 */
+:root {
+  /* 底色 */
+  --ink: #0a1120;
+  --ink-2: #0e1830;
+  --app-bg: #0a1120;
+
+  /* 表面层级(数字越大越靠前) */
+  --surface: rgba(255, 255, 255, .045);       /* 输入框等次级面 */
+  --surface-1: rgba(20, 32, 58, .72);         /* 卡片 */
+  --surface-2: rgba(255, 255, 255, .055);     /* 卡片内嵌块 */
+  --surface-hover: rgba(255, 255, 255, .085);
+  --surface-solid: #14203a;                   /* 需要不透明时使用 */
+
+  /* 描边 */
+  --stroke: rgba(255, 255, 255, .10);
+  --stroke-strong: rgba(255, 255, 255, .18);
+
+  /* 文字 */
+  --text: #e9edf5;
+  --text-muted: #98a5ba;
+  --text-faint: #6b7a90;
+
+  /* 主色(项目主色 #185fa5 在深色底上提亮) */
+  --primary: #3b8ede;
+  --primary-strong: #4d9bee;
+  --primary-dark: #2a6fb4;
+  --primary-soft: rgba(59, 142, 222, .16);
+  --primary-soft-strong: rgba(59, 142, 222, .26);
+  --primary-glow: rgba(59, 142, 222, .18);
+
+  /* 辅助色(项目辅色 #0f6e56 提亮) */
+  --accent: #3fc79a;
+  --accent-soft: rgba(63, 199, 154, .15);
+  --accent-text: #7ddcbb;
+
+  /* 状态色 */
+  --danger: #f2777a;
+  --danger-soft: rgba(242, 119, 122, .16);
+  --danger-bg: rgba(242, 119, 122, .10);
+  --danger-text: #f6a3a5;
+  --warn: #f0b429;
+  --warn-bg: rgba(240, 180, 41, .12);
+  --warn-text: #f5c866;
+
+  /* 图表 / 层级标识(深色底提亮) */
+  --chart-1: #4d9bee;
+  --chart-2: #3fc79a;
+  --chart-3: #f0b429;
+  --chart-4: #b48ef0;
+  --chart-5: #e879a0;
+  --chart-6: #f7b680;
+  --chart-7: #7ddcbb;
+
+  /* 圆角 / 动效 */
+  --radius-lg: 24px;
+  --radius-md: 11px;
+  --radius-sm: 9px;
+  --ease: cubic-bezier(.4, .9, .3, 1);
+  --dur: .2s;
+}
+
+/* --------------------------------------------------------- 2. 兼容别名 */
+/* 旧页面(summary / habits)沿用 --bg / --card / --border 等命名,
+   统一映射到新令牌,避免两套颜色漂移。 */
+:root {
+  --bg: var(--app-bg);
+  --card: var(--surface-1);
+  --border: var(--stroke);
+  --muted: var(--text-muted);
+  --tag: var(--primary-soft);
+  --tagtext: var(--primary-strong);
+}
+
+/* --------------------------------------------------------- 3. 基础排版 */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  background:
+    radial-gradient(900px 600px at 8% -10%, rgba(59, 142, 222, .16), transparent 62%),
+    radial-gradient(760px 560px at 104% 112%, rgba(63, 199, 154, .12), transparent 60%),
+    linear-gradient(180deg, var(--ink-2) 0%, var(--ink) 100%);
+  background-attachment: fixed;
+}
+
+a { color: var(--primary); }
+
+:focus-visible {
+  outline: 2px solid var(--primary-strong);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 内容容器 */
+.wrap {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: clamp(18px, 3vw, 28px) clamp(16px, 3vw, 24px) 48px;
+}
+
+/* --------------------------------------------------------- 4. 顶部导航 */
+.app-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 clamp(16px, 3vw, 24px);
+  height: 58px;
+  border-bottom: 1px solid var(--stroke);
+  background: rgba(10, 17, 32, .82);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.app-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.app-nav__mark {
+  width: 28px; height: 28px;
+  flex: none;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, var(--primary-strong), var(--primary-dark));
+  box-shadow: 0 4px 12px rgba(42, 111, 180, .4);
+}
+
+.app-nav__links {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.app-nav__links::-webkit-scrollbar { display: none; }
+
+.app-nav__link {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur), background var(--dur);
+}
+.app-nav__link:hover { color: var(--text); background: var(--surface-hover); }
+.app-nav__link.is-active {
+  color: #fff;
+  background: var(--primary-soft-strong);
+}
+
+.app-nav__spacer { flex: 1; }
+
+.app-nav__user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.app-nav__avatar {
+  width: 28px; height: 28px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(145deg, var(--primary-strong), var(--primary-dark));
+}
+.app-nav__name {
+  font-size: 13px;
+  color: var(--text);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-nav__role {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid rgba(63, 199, 154, .3);
+}
+
+.app-nav__logout {
+  padding: 6px 13px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur), border-color var(--dur), background var(--dur);
+}
+.app-nav__logout:hover {
+  color: var(--danger-text);
+  border-color: rgba(242, 119, 122, .45);
+  background: var(--danger-bg);
+}
+
+/* --------------------------------------------------------- 5. 通用组件 */
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  padding: clamp(16px, 2.4vw, 20px);
+  margin-bottom: 16px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.page-title {
+  font-size: clamp(19px, 2.2vw, 22px);
+  font-weight: 600;
+  letter-spacing: .3px;
+  margin-bottom: 4px;
+}
+.page-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 18px;
+}
+
+/* 按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 14px;
+  color: #fff;
+  cursor: pointer;
+  background: linear-gradient(180deg, var(--primary) 0%, var(--primary-dark) 100%);
+  box-shadow: 0 4px 14px rgba(42, 111, 180, .32), inset 0 1px 0 rgba(255, 255, 255, .18);
+  transition: filter var(--dur), transform .14s, box-shadow var(--dur);
+}
+.btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.btn:active { transform: none; }
+.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; filter: none; }
+
+.btn--ghost {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  color: var(--text-muted);
+  box-shadow: none;
+}
+.btn--ghost:hover {
+  color: var(--text);
+  border-color: var(--stroke-strong);
+  background: var(--surface-hover);
+  filter: none;
+}
+
+/* 下拉框 */
+.select {
+  padding: 8px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color var(--dur), box-shadow var(--dur);
+}
+.select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3.5px var(--primary-soft);
+}
+
+/* 徽章 */
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.badge--ok { background: var(--accent-soft); color: var(--accent-text); }
+.badge--warn { background: var(--warn-bg); color: var(--warn-text); }
+.badge--danger { background: var(--danger-bg); color: var(--danger-text); }
+.badge--info { background: var(--primary-soft); color: var(--primary-strong); }
+
+/* 空态 / 加载 */
+.empty {
+  padding: 28px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.loading {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------- 6. 响应式 */
+@media (max-width: 720px) {
+  .app-nav { height: auto; min-height: 54px; padding: 8px 14px; flex-wrap: wrap; gap: 10px; }
+  .app-nav__links { margin-left: 0; order: 3; width: 100%; }
+  .app-nav__name { max-width: 84px; }
+  .app-nav__role { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .app-nav, .card { background: var(--surface-solid); }
+}

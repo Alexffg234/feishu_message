@@ -1,0 +1,28 @@
+*{box-sizing:border-box;margin:0;padding:0}
+
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:22px;font-weight:600;margin-bottom:4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .bar{display:flex;gap:10px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+  .refresh{padding:8px 16px;border:none;border-radius:8px;background:var(--primary);color:#fff;cursor:pointer;font-size:14px}
+  .refresh:hover{opacity:.9}
+  .stamp{font-size:12px;color:var(--muted)}
+
+  /* 指标卡 */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center}
+  .card .num{font-size:26px;font-weight:700;color:var(--primary)}
+  .card .lbl{font-size:12px;color:var(--muted);margin-top:4px}
+
+  /* 面板 */
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px}
+  .panel h2{font-size:15px;font-weight:600;margin-bottom:12px;color:var(--text)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+
+  .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
+
+  .empty-note{color:var(--muted);font-size:13px;padding:18px}
+  .tip{font-size:12px;color:var(--muted);margin-top:8px}
+  svg text{user-select:none}

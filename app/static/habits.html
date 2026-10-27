@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>群聊对话习惯分析</title>
+<link rel="stylesheet" href="/static/components.css?v=1.0.0">
+<link rel="stylesheet" href="/static/habits.css?v=1.0.0">
+
+</head>
+<body>
+<div id="app-nav"></div>
+<div class="wrap">
+  <h1 class="page-title">群聊对话习惯分析</h1>
+  <div class="page-sub">谁最活跃 · 爱发什么 · 何时发言 · 互动方式 · 表达长短</div>
+
+  <div class="bar">
+    <button class="refresh" onclick="loadAll()">刷新</button>
+    <span class="stamp" id="stamp"></span>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid2">
+    <div class="panel"><h2>活跃成员 TOP</h2><div id="senders"></div></div>
+    <div class="panel"><h2>消息形态分布</h2><div id="types"></div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel"><h2>文字长度习惯</h2><div id="lengths"></div></div>
+    <div class="panel"><h2>24 小时活跃度（东八区）</h2><div id="hours"></div></div>
+  </div>
+
+  <div class="panel"><h2>每周活跃</h2><div id="weeks"></div></div>
+
+  <div class="panel"><h2>互动模式</h2><div class="grid2">
+    <div id="interact"></div>
+    <div id="chain"></div>
+  </div></div>
+</div>
+
+
+<script src="/static/nav.js?v=1.0.0" defer></script>
+<script src="/static/habits.js?v=1.0.0" defer></script>
+</body>
+</html>

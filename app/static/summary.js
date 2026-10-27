@@ -58,56 +58,85 @@ async function loadSummary(id){
     else{boxS.className='empty-note';boxS.textContent = d.enabled?'(生成失败,请稍后重试)':'(未配置 LLM,无法生成总结文案;在服务器 config/.env 填 LLM_API_BASE/KEY/MODEL 后生效)';}
 
     boxC.className='';
-    boxC.innerHTML = renderTree(d.tree||[], 0) || '<span class="empty-note">该对话无消息内容</span>';
+    boxC.innerHTML = renderTimeline(d.tree||[]) || '<span class="empty-note">该对话无消息内容</span>';
     meta.textContent = '共 '+d.message_count+' 条消息 · 会话ID #'+d.conversation_id;
   }catch(e){
     boxS.textContent='请求失败: '+e; boxC.textContent='';
   }
 }
 
-function renderTree(nodes, depth){
-  let html='';
-  for(const n of nodes){
-    const m=n.message;
-    if(m){
-      const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
-      let bodyHtml;
-      if(m.message_type === 'media'){
-        // 视频消息
-        if(m.file_url){
-          bodyHtml = '<video class="msg-video" src="'+esc(m.file_url)+'" controls preload="metadata"'
-                   + (m.image_url ? ' poster="'+esc(m.image_url)+'"' : '') + '></video>'
-                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
-        } else if(m.image_url){
-          bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[视频封面]" onclick="window.open(this.src)">'
-                   + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
-        } else {
-          bodyHtml = '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
-        }
-      } else if(m.message_type === 'file'){
-        // 普通文件消息:展示可下载的文件卡片
-        if(m.file_url){
-          bodyHtml = '<span class="msg-file"><span class="fname">'+esc(m.file_name || '文件')+'</span>'
-                   + '<a class="dl" href="'+esc(m.file_url)+'" target="_blank" rel="noopener" download>下载</a></span>';
-        } else {
-          bodyHtml = '<span class="empty-note">[文件(未落盘 '+esc(m.file_name||m.file_key||'')+')]</span>';
-        }
-      } else if(m.image_url){
-        // 图片消息:展示七牛图片
-        bodyHtml = '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
-      } else if(m.message_type === 'image'){
-        // 图片但未落盘(未配置七牛/下载失败):占位提示
-        bodyHtml = '<span class="empty-note">[图片(未落盘 '+(m.image_key||'')+')]</span>';
-      } else {
-        bodyHtml = esc(renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')');
-      }
-      html += '<div class="msg indent-'+Math.min(depth,4)+'">'
-            + '<div class="who">'+esc(who)+'</div>'
-            + '<div class="body">'+bodyHtml+'</div></div>';
+function timeOf(m){
+  const t = Number(m && m.create_time);
+  return (isFinite(t) && t > 0) ? t : Number.MAX_SAFE_INTEGER;
+}
+
+// 把回复树拍平成消息列表,并按时间升序排序(完整对话按时间顺序展示)
+function flattenTree(nodes){
+  const out = [];
+  const walk = ns => {
+    for(const n of (ns||[])){
+      if(n.message) out.push(n.message);
+      if(n.children && n.children.length) walk(n.children);
     }
-    if(n.children && n.children.length){
-      html += renderTree(n.children, depth+1);
+  };
+  walk(nodes);
+  out.sort((a,b) => timeOf(a) - timeOf(b));
+  return out;
+}
+
+// 两个问题块之间是否需要横杠分隔:后端已对「带已有标签的新消息并入对话」的首条消息
+// 打上 block_start=1,前端在该消息前画横杠
+function isSep(m){
+  return m.block_start === 1 || m.block_start === true;
+}
+
+// 单条消息的正文(文本/图片/视频/文件)
+function msgBodyHtml(m){
+  if(m.message_type === 'media'){
+    // 视频消息
+    if(m.file_url){
+      return '<video class="msg-video" src="'+esc(m.file_url)+'" controls preload="metadata"'
+           + (m.image_url ? ' poster="'+esc(m.image_url)+'"' : '') + '></video>'
+           + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+    } else if(m.image_url){
+      return '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[视频封面]" onclick="window.open(this.src)">'
+           + (m.file_name ? '<div class="media-name">'+esc(m.file_name)+'</div>' : '');
+    } else {
+      return '<span class="empty-note">[视频(未落盘 '+(m.file_name||m.file_key||'')+')]</span>';
     }
+  } else if(m.message_type === 'file'){
+    // 普通文件消息:展示可下载的文件卡片
+    if(m.file_url){
+      return '<span class="msg-file"><span class="fname">'+esc(m.file_name || '文件')+'</span>'
+           + '<a class="dl" href="'+esc(m.file_url)+'" target="_blank" rel="noopener" download>下载</a></span>';
+    } else {
+      return '<span class="empty-note">[文件(未落盘 '+esc(m.file_name||m.file_key||'')+')]</span>';
+    }
+  } else if(m.image_url){
+    // 图片消息:展示七牛图片
+    return '<img class="msg-img" src="'+esc(m.image_url)+'" loading="lazy" alt="[图片]" onclick="window.open(this.src)">';
+  } else if(m.message_type === 'image'){
+    // 图片但未落盘(未配置七牛/下载失败):占位提示
+    return '<span class="empty-note">[图片(未落盘 '+(m.image_key||'')+')]</span>';
+  } else {
+    return esc(renderAt(m.text, m.mentions) || '(' + (m.message_type||'非文本') + ')');
+  }
+}
+
+// 完整对话:按时间顺序平铺,新问题块(block_start=1)前用横杠分隔
+function renderTimeline(tree){
+  const msgs = flattenTree(tree);
+  if(!msgs.length) return '';
+  let html = '';
+  for(let i=0; i<msgs.length; i++){
+    const m = msgs[i];
+    if(i > 0 && isSep(m)){
+      html += '<div class="chat-sep"><span>'+esc(fmtMs(m.create_time))+'</span></div>';
+    }
+    const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
+    html += '<div class="msg">'
+          + '<div class="who">'+esc(who)+'<span class="mtime">'+esc(fmtMs(m.create_time))+'</span></div>'
+          + '<div class="body">'+msgBodyHtml(m)+'</div></div>';
   }
   return html;
 }

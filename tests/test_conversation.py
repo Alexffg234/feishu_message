@@ -122,9 +122,35 @@ def test_tree_query_repo():
     print("tree repo OK")
 
 
+def test_tree_dangling_parent_not_lost():
+    """回复边指向库外消息(回复了捕获前旧消息,父不在 messages)时,
+    子消息应按根节点展示,不能无声丢失(线上 #143/#317 16:54 消息案例)。"""
+    svc, session = _make_service()
+    svc.save_message(_msg("r", "u1"))
+    conv = session.query(Conversation).one()
+    session.add(Message(
+        message_id="d1", chat_id="oc_test", sender_id="u2", sender_type="user",
+        message_type="text", text="回复旧消息", create_time="1700000001000",
+        root_message_id="r", conversation_id=conv.id,
+        parent_message_id="om_out_of_db",
+    ))
+    session.add(MessageLink(
+        conversation_id=conv.id, parent_message_id="om_out_of_db",
+        child_message_id="d1", parent_sender_id="u0", child_sender_id="u2", depth=1,
+    ))
+    session.commit()
+
+    tree = ConversationRepo(session).list_tree(conv.id)
+    assert tree["message_count"] == 2
+    root_ids = {r["message"]["message_id"] for r in tree["roots"]}
+    assert root_ids == {"r", "d1"}, f"悬挂边子消息应按根节点展示,实际 {root_ids}"
+    print("dangling parent OK")
+
+
 if __name__ == "__main__":
     test_single_message_forms_conversation()
     test_reply_chain_forms_links()
     test_multi_root_same_chat_separate_conversations()
     test_tree_query_repo()
+    test_tree_dangling_parent_not_lost()
     print("ALL CONVERSATION TESTS PASSED")

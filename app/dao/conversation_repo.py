@@ -209,7 +209,13 @@ class ConversationRepo:
             return {"message": self._tree_dict(node), "children": children}
 
         roots = []
-        child_ids = {link.child_message_id for link in links}
+        # 父消息不在本对话(回复了库外/更早的旧消息)的悬挂边:子消息按根节点处理,
+        # 否则该消息会无声地从树里丢失
+        child_ids = {
+            link.child_message_id
+            for link in links
+            if link.parent_message_id in by_id
+        }
         for m in messages:
             if m.message_id not in child_ids:
                 roots.append(build(m.message_id))

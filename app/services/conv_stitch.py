@@ -12,9 +12,9 @@ _BATCH_STEP(重叠 1 个,边界会话会被两个窗口共同判定),每个窗�
 避免 LLM 偶发误判经闭包链式放大成巨型过度合并)。
 
 安全护栏(LLM 误判防护):
-- 时间间隙:源会话开始 - 目标会话结束 > _MAX_GAP_MS(6 小时)不合并,
-  问题处理生命周期极少跨这么长;
-- 标签冲突:双方都有非空 topic 且不同时不合并(已有确定标签是强反证)。
+- 标签冲突:双方都有非空 topic 且不同时不合并(已有确定标签是强反证);
+- 无时间间隙护栏:是否同一案例完全交由 LLM 判定,长间隔(如隔夜)的同案例续聊
+  同样可以缝合合并。
 """
 from __future__ import annotations
 
@@ -36,8 +36,6 @@ _BATCH_SIZE = 5
 _BATCH_STEP = 4
 # 每会话代表消息条数上限(首条+末条+最长)
 _REPR_CHARS = 60
-# 时间间隙护栏:源会话开始 - 目标会话结束 超过该值不合并(问题生命周期极少跨这么长)
-_MAX_GAP_MS = 6 * 3600 * 1000
 
 _SYSTEM_PROMPT = (
     "你是群聊对话缝合判定器。以下是同一群内按时间顺序相邻的若干会话,每个会话给出"
@@ -93,14 +91,10 @@ def _parse_stitch_result(raw: str, n: int) -> set[int]:
 
 
 def _pair_allowed(src: Conversation, tgt: Conversation, chat_id: str) -> bool:
-    """合并对护栏:时间间隙超限或双方 topic 冲突时拒绝。"""
-    gap_ms = src.started_at_ms - tgt.last_message_at_ms
-    if gap_ms > _MAX_GAP_MS:
-        logger.info(
-            "会话缝合跳过 %s: #%d -> #%d 时间间隙 %.1f 小时超过 %.0f 小时",
-            chat_id, src.id, tgt.id, gap_ms / 3600000, _MAX_GAP_MS / 3600000,
-        )
-        return False
+    """合并对护栏:双方 topic 冲突时拒绝(已有确定标签是强反证)。
+
+    无时间间隙护栏:是否同一案例交由 LLM 判定,长间隔续聊也可合并。
+    """
     if src.topic and tgt.topic and src.topic != tgt.topic:
         logger.info(
             "会话缝合跳过 %s: #%d -> #%d 主题冲突(%s vs %s)",
@@ -140,7 +134,7 @@ def plan_stitches(
     """规划会话缝合并对,返回 [(源会话id, 目标会话id)],目标=同组最早会话。
 
     每个窗口的合并集合独立解析(不做跨窗传递闭包,防链式放大过度合并),
-    每个 (源,目标) 对再过时间间隙/主题冲突护栏。
+    每个 (源,目标) 对再过主题冲突护栏。
     只读不改库,供 dry-run 预览;llm 为空或会话不足 2 个时返回空。
     """
     if llm is None:

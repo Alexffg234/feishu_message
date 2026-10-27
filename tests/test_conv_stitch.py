@@ -2,7 +2,7 @@
 
 验证:按问题处理生命周期(提问→排查→对话→解决)把无回复链、标签缺失/
 垃圾标签的相邻会话合并;方向正确(最早会话为根)、异问题不并、
-不做跨窗传递闭包、时间间隙/主题冲突护栏、无 LLM 降级、规划只读、
+不做跨窗传递闭包、主题冲突护栏(时间间隙已不作护栏)、无 LLM 降级、规划只读、
 幂等、语气词标签守卫。
 """
 import sys
@@ -159,15 +159,16 @@ def test_no_cross_window_chain():
     print("no cross-window chain OK")
 
 
-def test_time_gap_guard():
-    """时间间隙 > 6 小时的会话对不合并。"""
+def test_time_gap_no_longer_guard():
+    """时间间隙不再是护栏:间隔 15 小时,LLM 判定同案例也应合并。"""
     svc, session, Session = _setup()
     svc.save_message(_msg("m1", "u1", T0, text="电视爆音"))
-    svc.save_message(_msg("m2", "u2", T0 + 15 * 3600_000, text="画质模糊"))
+    svc.save_message(_msg("m2", "u2", T0 + 15 * 3600_000, text="爆音还在,换了HDMI线"))
     llm = FakeLLM("1,2")
-    assert plan_stitches(session, CHAT, llm) == []
-    assert len(session.query(Conversation).all()) == 2
-    print("time gap guard OK")
+    convs = {c.root_message_id: c.id for c in session.query(Conversation).all()}
+    assert plan_stitches(session, CHAT, llm) == [(convs["m2"], convs["m1"])]
+    assert len(session.query(Conversation).all()) == 2, "规划只读"
+    print("time gap no longer guard OK")
 
 
 def test_topic_conflict_guard():
@@ -214,7 +215,7 @@ if __name__ == "__main__":
     test_different_problems_no_stitch()
     test_no_llm_returns_empty()
     test_no_cross_window_chain()
-    test_time_gap_guard()
+    test_time_gap_no_longer_guard()
     test_topic_conflict_guard()
     test_single_conversation_no_stitch()
     test_stop_label_guard()

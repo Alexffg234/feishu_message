@@ -369,6 +369,20 @@ GET /health -> {"status":"ok"}
 
 ### 2026-10-27
 
+- **`eba1568` fix(front): /summary 恢复完整对话平铺展示与横杠分隔**
+  - `139a56c` 前端工程化合并时 `summary.js` 取到旧版(递归回复树),`9955b0a` 的平铺+横杠逻辑丢失;移植回 `renderTimeline`:`flattenTree` 拍平后按时间升序,`block_start=1` 消息前画横杠(`.chat-sep`,深色主题 token)
+  - 每条消息 who 行补回时间;保留新版 tabs/大类折叠/媒体画廊等功能
+- **`139a56c` feat(front): 前端工程化——静态资源层 + 公共组件 + 全站深色 + 全局导航**(workbuddy 会话)
+  - `summary_page.py`/`habits_page.py` 抽到 `app/static/`(summary.js/css、habits.js/css、components.css、nav.js),页面壳改为独立 html
+  - 全站深色主题(设计 token 集中在 components.css)
+- **`5377cf3` docs: 明确 COOKIE_SECURE 判定依据是浏览器侧协议而非应用监听协议**
+- **`ae2dd3f` feat(auth): 登录注册与全站访问控制——未登录不可访问任何页面/接口**(workbuddy 会话)
+  - users 表 + PBKDF2-SHA256(200k) 加盐哈希、HMAC-SHA256 签名 Stateless Cookie、5 次/5 分钟登录限流;`/login` 页面与 `/api/auth/*`;HTTP 中间件拦截(页面 302、API 401),`/static/` 与 `/feishu/event` 白名单放行
+  - 建号脚本 `scripts/create_user.py`
+- **存量数据修正(直接改生产库,无代码变更)**
+  - 全量横杠回填:12 个对话新增 17 处 `block_start`(DB 共 20 处);判定=时间断档+发送者(不同门店/人=不同案例)+设备(UUID/MAC 不同=不同机器)+语义;同一案例续聊(如 #111 同一人 6 天追问、#146 隔夜复现)一律不画
+  - 同主题同群对话归并 5 组:#317→#113 投屏卡顿、#304→#234 投屏找不到设备、#274→#146 系统不定时重启、#308→#63 花屏问题、#284→#144 镜像投屏卡顿(单条「好的」类续聊碎片用 `--no-block-start` 并入)
+  - 大类配置追加 4 个 topic:画质模糊→画面模糊类问题、语音识别无跳转→语音类问题、取消推送更新+无法输入密码→系统类问题(加入即成为标准标签,后续同类 LLM 沿用、只归类不合并)
 - **`e8df666` refactor: 会话缝合去掉 6 小时时间护栏**
   - 时间间隙不再是缝合护栏,是否同一案例完全交由 LLM 判定(隔夜续聊等长间隔也可自动合并);保留标签冲突护栏(双方 topic 不同不合并,已有确定标签是强反证)
 

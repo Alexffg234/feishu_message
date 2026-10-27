@@ -83,6 +83,21 @@ class Settings(BaseSettings):
     # 0 = 禁用后台定时(仅手动 POST 触发)。
     topic_summary_interval_minutes: int = 10
 
+    # ---------- 访问控制(登录注册)----------
+    # true = 除白名单(登录页/认证接口/健康检查/飞书事件回调)外,全部要求登录
+    # false = 关闭认证(仅本地调试用,切勿在生产开启)
+    auth_enabled: bool = True
+    # 是否开放自助注册;false 时只能用 scripts/create_user.py 建号
+    # (库里尚无账号时,注册始终开放,保证首次部署能创建管理员)
+    allow_public_register: bool = True
+    # 登录态有效期(小时)
+    session_ttl_hours: int = 12
+    # 会话 cookie 签名密钥;留空则自动生成并持久化到 data/.session_secret
+    # 生产建议显式配置(多机部署时各实例需一致,否则会互相踢下线)
+    session_secret: str = ""
+    # 会话 cookie 是否仅 HTTPS 传输;站点为 https 时必须置 true
+    cookie_secure: bool = False
+
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)

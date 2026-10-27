@@ -49,6 +49,14 @@ async def lifespan(app: FastAPI):
     get_topic_summary_service().start()
     logger.info("服务启动完成 host=%s port=%s db=%s",
                 settings.host, settings.port, settings.database_url)
+    if settings.auth_enabled:
+        logger.info("访问控制已开启: 未登录将跳转 /login(飞书回调 %s 保持开放)",
+                    settings.event_path)
+        from app.services.auth_service import count_users
+
+        with SessionLocal() as s:
+            if count_users(s) == 0:
+                logger.warning("尚未创建任何账号,请访问 /login 注册首个账号(自动成为管理员)")
     yield
     # 应用关闭(优雅):停后台调度 + 排空事件队列,处理完在途事件再退出
     get_topic_summary_service().stop()
@@ -70,7 +78,13 @@ def create_app() -> FastAPI:
     # 把 dispatcher 挂到路由模块(工厂内提前初始化,保证路由可用)
     routes_module.dispatcher = _dispatcher()
 
+    # 登录注册页与认证接口(需在业务路由之前注册)
+    from app.api import auth as auth_module
+
+    app.include_router(auth_module.router)
     app.include_router(routes_module.router)
+    # 全站访问控制:白名单之外必须登录(飞书事件回调在白名单内)
+    auth_module.install_auth_middleware(app)
     logger.setLevel(logging.DEBUG)
     return app
 

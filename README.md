@@ -23,7 +23,12 @@ feishu_message/
 │   ├── init_db.py                  # 初始化数据库(含对话表)
 │   ├── query_messages.py           # 查看/导出/分组查询已采集消息
 │   ├── backfill_conversations.py   # 存量消息回填成对话关系(幂等)
-│   └── query_conversations.py      # 查询对话/回复树
+│   ├── query_conversations.py      # 查询对话/回复树
+│   ├── rethread_backfill.py        # 存量同标签归并/重打标签
+│   ├── stitch_conversations.py     # 手动会话缝合(LLM 生命周期判定)
+│   ├── merge_conversations.py      # 手动把多个对话归并为一个案例
+│   ├── move_messages.py            # 把某对话时间窗内消息挪入另一对话
+│   └── backfill_block_start.py     # 存量对话回填新问题块起点(横杠)标记
 └── app/
     ├── main.py             # FastAPI 应用工厂
     ├── api/routes.py       # HTTP 路由(事件回调 + 查询接口)
@@ -55,7 +60,7 @@ python scripts/query_conversations.py --tree <id>      # 某对话的完整回�
 
 内建一个轻量可视化页面,用于查看一次完整对话及其 LLM 总结文案(验证分类/聚合效果):
 
-- `GET /summary`：可视化页面(对话下拉 + 总结卡片 + 回复树)
+- `GET /summary`：可视化页面(对话下拉 + 总结卡片 + 完整对话按时间平铺 + 横杠分隔不同问题)
 - `GET /api/conversations`：最近对话列表
 - `GET /api/summary/{conversation_id}`：某对话详情 + LLM 总结 + 回复树
 
@@ -220,7 +225,13 @@ python scripts/rethread_backfill.py --chat oc_xxx             # 仅处理指定�
 同标签归并依赖 LLM 标签;当用户「只 @ 不回复」、各组无标签或标签是垃圾词
 (如「好的」)时,同一问题处理过程(提问→排查→多轮对话→给出解决方案)会拆成多个会话。
 会话缝合不依赖标签:把相邻会话的代表消息(首条/末条/最长)直接送 LLM 按生命周期判定,
-重叠窗口 + 并查集传递闭包,把同过程会话合并到最早会话(复用 `merge_groups`,幂等)。
+重叠窗口推进(不做跨窗传递闭包,防链式放大过度合并),把同过程会话合并到最早会话
+(复用 `merge_groups`,幂等)。护栏:时间间隙 > 6 小时不合并、双方 topic 冲突不合并。
+
+- **后台自动调度**(默认开启):服务启动后每 `CONV_STITCH_INTERVAL_MINUTES`(默认 30)分钟
+  自动跑一轮,只处理水位线(会话数/最大消息 id)有变化的群;
+  `CONV_STITCH_ENABLED=false` 或间隔设 0 禁用。缝合 = 同一案例续聊,合并后**不画横杠**。
+- **手动脚本**:
 
 ```bash
 # 本地验证(推荐):先只读导出到本地 sqlite,在副本上改,真实库不动
@@ -230,6 +241,17 @@ python scripts/stitch_conversations.py --chat oc_xxx --db data/local.sqlite --ap
 
 # 直接在库上执行(默认预览,--apply 才写库);循环「预览→apply」直到无拟合并对
 python scripts/stitch_conversations.py --chat oc_xxx --apply
+```
+
+### 横杠分隔(block_start)与消息挪组
+
+- `/summary` 完整对话按时间顺序平铺;带已有标签的新消息并入既有对话(新问题块)时
+  标记 `messages.block_start=1`,前端在该消息前画横杠;同一案例的续聊(缝合)不打标记不断句。
+- 人工修正工具:
+
+```bash
+python scripts/merge_conversations.py --ids 317,318,319 --topic 投屏卡顿 --no-block-start  # 多对话归并为一个案例
+python scripts/move_messages.py --from 143 --to 317 --start "2026-10-26 16:50" --end "2026-10-26 17:20" --topic 投屏卡顿
 ```
 
 ## 主题分类(LLM)
@@ -258,6 +280,30 @@ GET /messages/topics?chat_id=oc_xxx&limit=20
 GET /       -> {"status":"running","messages_count":123, ...}
 GET /health -> {"status":"ok"}
 ```
+
+## 变更历史
+
+### 2026-10-27
+
+- **`308ba72` fix: 回复树悬挂边子消息丢失;新增消息挪组脚本**
+  - 回复边指向库外消息(回复了捕获前的旧消息、父消息不在 `messages` 表)时,子消息此前会无声地从回复树里丢失;现按根节点展示(线上案例:#317 的 16:54 消息)
+  - 新增 `scripts/move_messages.py`:把某对话时间窗内的消息挪入另一对话(同一案例修正,回复边随动,双方重算统计)
+- **`7c486ad` feat: 会话缝合后台周期调度(同一案例续聊自动合并)**
+  - 新增 `app/services/conv_stitch_service.py`:后台守护线程每 `CONV_STITCH_INTERVAL_MINUTES`(默认 30 分钟)对水位线有变化的群跑 LLM 生命周期缝合,复用 `SchedulerLock` 租约多 worker 互斥;群水位线(会话数, 最大消息 id)不变则跳过省 LLM 调用
+  - 横杠规则:缝合 = 同一问题处理生命周期续聊,视为同一问题不断句,不打 `block_start` 标记(前端不画横杠);同标签归并路径保留标记(不同案例画横杠),`merge_groups` 新增 `mark_block_start` 参数
+  - 配置新增 `conv_stitch_enabled` / `conv_stitch_interval_minutes`;`main.py` lifespan 挂载启停
+  - 附带 `scripts/merge_conversations.py`:手动把多个对话归并为一个(同一案例人工修正,支持 `--no-block-start` 不打横杠)
+- **`9955b0a` feat: /summary 完整对话按时间顺序平铺展示,新问题块画横杠分隔**
+  - `/summary` 完整对话不再按回复树嵌套,拍平后按 `create_time` 升序展示;`messages.block_start=1` 的消息前画横杠,分隔同一对话里的不同问题
+  - 标记时机:带已有标签的新消息并入既有对话时(同标签归并/存量回填),由 `merge_groups` 自动打点;纯续聊不打
+  - 附带 `scripts/backfill_block_start.py`:存量对话按最大时间断档回填 `block_start`(幂等)
+
+### 更早
+
+- `2a99d04` 分类提示词注入标准标签(问题大类预配置名),同类问题自动沿用大类标准名;标准名只归类不合并
+- `433bd54` 问题大类支持两级分组(parent 父子层级),/summary 按 大类→子类→小类 三级折叠
+- `a18c40c` 主题参考知识库(标准自查手册),AI 解决步骤按手册组织
+- `69cdcd9` 问题大类分组(投屏问题=找不到设备+镜像卡顿+卡顿),/summary 按大类折叠小类
 
 ## 常见问题
 

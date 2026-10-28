@@ -29,6 +29,54 @@
       location.pathname.indexOf(href + '/') === 0;
   }
 
+  /* ---- 会话空闲倒计时 -------------------------------------------------
+     后端在每次有效请求时滑动续期会话(默认 10 分钟空闲即失效);
+     /api/auth/me 属于白名单,不会续期,所以可以安全用于查询剩余时间。
+     倒计时归零时先复核一次:确实过期 → 跳登录页;仍有效(说明期间有
+     其他请求续期过)→ 重新对齐倒计时,避免误踢。
+  ------------------------------------------------------------------- */
+  var timer = null;
+  var left = 0;
+
+  function fmt(sec) {
+    var s = Math.max(0, Math.floor(sec));
+    var m = Math.floor(s / 60);
+    return m + ':' + ('0' + (s % 60)).slice(-2);
+  }
+
+  function paintCountdown(node) {
+    var t = fmt(left);
+    node.textContent = t + ' 后自动退出';
+    node.title = '长时间无操作会自动退出登录';
+    node.classList.toggle('is-warning', left <= 60);
+  }
+
+  function goLogin() {
+    var next = location.pathname + location.search;
+    location.assign('/login?next=' + encodeURIComponent(next));
+  }
+
+  function startCountdown(node, seconds) {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (!node || !seconds || seconds <= 0) { return; }
+    left = seconds;
+    paintCountdown(node);
+    timer = setInterval(function () {
+      left -= 1;
+      paintCountdown(node);
+      if (left > 0) { return; }
+      clearInterval(timer); timer = null;
+      // 归零:复核服务端真实状态,避免误踢
+      fetch('/api/auth/me', { credentials: 'same-origin' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (u) {
+          if (u && u.expires_in > 1) { startCountdown(node, u.expires_in); }
+          else { goLogin(); }
+        })
+        .catch(function () { goLogin(); });
+    }, 1000);
+  }
+
   function initial(name) {
     var n = (name || '?').trim();
     return n ? n.charAt(0).toUpperCase() : '?';
@@ -75,6 +123,12 @@
     if (user && user.role) {
       userBox.appendChild(el('span', 'app-nav__role', user.role === 'admin' ? '管理员' : '成员'));
     }
+    // 会话状态:剩余有效时间倒计时
+    var countdown = null;
+    if (user && user.expires_in > 0) {
+      countdown = el('span', 'app-nav__session');
+      userBox.appendChild(countdown);
+    }
     nav.appendChild(userBox);
 
     // 退出
@@ -90,6 +144,7 @@
     nav.appendChild(logout);
 
     root.appendChild(nav);
+    startCountdown(countdown, user && user.expires_in);
   }
 
   function boot() {

@@ -284,12 +284,17 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + padding)
 
 
-def sign_session(user: User, ttl_seconds: int) -> str:
-    """生成签名会话串: base64url(payload).hmac_sha256。"""
+def sign_session(user: User, ttl_seconds: int, iat: int | None = None) -> str:
+    """生成签名会话串: base64url(payload).hmac_sha256。
+
+    iat(签发时间)用于滑动续期时保留「最初登录时刻」,保证续期不会无限延长会话。
+    """
+    now = int(time.time())
     payload = {
         "uid": int(user.id),
         "u": user.username,
-        "exp": int(time.time()) + int(ttl_seconds),
+        "iat": int(iat) if iat else now,
+        "exp": now + int(ttl_seconds),
     }
     body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(
@@ -315,6 +320,43 @@ def parse_session(token: str) -> dict | None:
     if not isinstance(payload, dict) or int(payload.get("exp", 0)) < int(time.time()):
         return None
     return payload
+
+
+def renew_session(token_payload: dict, idle_seconds: int, max_ttl_seconds: int) -> str | None:
+    """滑动续期:把会话的 exp 往后推 idle_seconds,但不超过绝对有效期上限。
+
+    - token_payload: parse_session 解析出的 payload(含 uid/u/iat/exp)
+    - idle_seconds: 空闲窗口(如 600 = 10 分钟无请求即失效)
+    - max_ttl_seconds: 绝对有效期(从最初登录 iat 算起)
+
+    返回新的会话串;已到绝对上限或参数非法返回 None(调用方据此不再下发 cookie)。
+    """
+    if not token_payload or idle_seconds <= 0:
+        return None
+    try:
+        uid = int(token_payload.get("uid", 0))
+        iat = int(token_payload.get("iat", 0))
+    except (TypeError, ValueError):
+        return None
+    if uid <= 0 or iat <= 0:
+        return None
+
+    now = int(time.time())
+    deadline = iat + int(max_ttl_seconds)
+    new_exp = min(now + int(idle_seconds), deadline)
+    if new_exp <= now:
+        return None  # 已达绝对有效期上限,不再续期
+
+    body = _b64url_encode(
+        json.dumps(
+            {"uid": uid, "u": token_payload.get("u", ""), "iat": iat, "exp": new_exp},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    sig = hmac.new(
+        get_session_secret().encode("utf-8"), body.encode("utf-8"), hashlib.sha256
+    ).digest()
+    return f"{body}.{_b64url_encode(sig)}"
 
 
 # ---------------------------------------------------------------- 登录限流

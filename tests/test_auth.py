@@ -70,6 +70,17 @@ def test_health_and_ready_public(client):
     assert client.get("/health").status_code == 200
 
 
+def test_healthz_public_and_shape(client):
+    """/healthz 无需登录,并返回监控字段。"""
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert "db" in body
+    assert "queue_backlog" in body
+    assert "dead_letter" in body and "lines" in body["dead_letter"]
+    assert "last_message_seconds_ago" in body
+
+
 def test_feishu_callback_not_blocked(client):
     """飞书事件回调在白名单内:不能返回 302/401,否则消息采集中断。"""
     r = client.get("/feishu/event")
@@ -211,6 +222,19 @@ def test_session_tamper_rejected(client):
     assert parse_session("") is None
 
 
+def test_masks_database_url_in_logs():
+    """数据库 URL 里的密码必须被打码,防止泄露进日志/告警。"""
+    from app.core.config import mask_db_url
+
+    masked = mask_db_url(
+        "mysql+pymysql://root:GoGo2016@112.126.101.128:3306/feishu_message?charset=utf8mb4"
+    )
+    assert "GoGo2016" not in masked
+    assert "root:***" in masked
+    assert mask_db_url("sqlite:///./data/messages.db") == "sqlite:///./data/messages.db"
+    assert mask_db_url("") == ""
+
+
 def test_sign_session_expiry():
     class _U:
         id = 1
@@ -218,3 +242,75 @@ def test_sign_session_expiry():
 
     expired = sign_session(_U(), -10)
     assert parse_session(expired) is None
+
+
+# ---------------------------------------------------------------- 空闲超时
+def test_renew_session_slides_and_caps(client):
+    """renew_session:续期后 exp 后移一个空闲窗口,但不越过绝对有效期。"""
+    from app.services.auth_service import renew_session
+
+    class _U:
+        id = 7
+        username = "slider"
+
+    idle = 600  # 10 分钟
+    token = sign_session(_U(), idle)
+    payload = parse_session(token)
+    assert payload and payload["iat"] > 0
+
+    # 1) 续期:exp 应 >= 原 exp(往后推),且不超过 iat + 绝对上限
+    renewed = renew_session(payload, idle, 3600)
+    p2 = parse_session(renewed)
+    assert p2 is not None and p2["exp"] >= payload["exp"]
+    assert p2["exp"] <= payload["iat"] + 3600
+    assert p2["iat"] == payload["iat"]  # 最初登录时刻不能被改写
+
+    # 2) 已达绝对上限:不再续期
+    assert renew_session(payload, idle, 0) is None
+
+    # 3) 非法 payload
+    assert renew_session({}, idle, 3600) is None
+    assert renew_session({"uid": 0, "iat": 0}, idle, 3600) is None
+
+
+def test_sliding_refresh_on_activity(client):
+    """有访问时会话被滑动续期:响应里带回新 cookie,且有效期收敛到空闲窗口。"""
+    name = _uname("slide")
+    r = client.post(
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
+    )
+    assert r.status_code == 200
+    before = r.cookies[COOKIE_NAME]
+
+    # 普通接口属于「用户活动」,应触发滑动续期(认证接口 /api/auth/* 不算)
+    assert client.get("/api/topics").status_code == 200
+    after = client.cookies.get(COOKIE_NAME)
+    assert after and after != before, "有效访问应触发滑动续期"
+
+    # 续期后剩余有效期应收敛到空闲窗口(10 分钟),而不是原始的 12 小时
+    payload = parse_session(after)
+    assert payload is not None
+    assert 0 < payload["exp"] - int(time.time()) <= 600
+
+    # /api/auth/me 暴露剩余时间,供前端显示登录状态
+    body = client.get("/api/auth/me").json()
+    assert body["idle_timeout"] == 600
+    assert 0 < body["expires_in"] <= 600
+
+
+def test_expired_session_logs_out(client):
+    """会话过期后:接口 401、页面跳登录页。"""
+    name = _uname("exp")
+    assert client.post(
+        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
+    ).status_code == 200
+
+    class _U:
+        id = 1
+        username = name
+
+    # 直接塞一个已过期的会话串(cookie 的 exp 在签发时就固定)
+    client.cookies.set(COOKIE_NAME, sign_session(_U(), -10))
+    assert client.get("/api/auth/me").status_code == 401
+    r = client.get("/summary", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"].startswith("/login")

@@ -20,6 +20,7 @@ install_auth_middleware(app) 注册一个 HTTP 中间件,白名单之外的一�
 from __future__ import annotations
 
 import logging
+import time
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -186,12 +187,22 @@ def logout() -> JSONResponse:
 
 
 @router.get("/api/auth/me")
-def me(user: User = Depends(get_current_user)) -> dict:
+def me(request: Request, user: User = Depends(get_current_user)) -> dict:
+    """当前登录用户 + 会话剩余有效期(供前端显示登录状态/倒计时)。"""
+    settings = get_settings()
+    expires_in = 0
+    payload = auth_service.parse_session(
+        request.cookies.get(auth_service.COOKIE_NAME, "")
+    )
+    if payload:
+        expires_in = max(0, int(payload.get("exp", 0)) - int(time.time()))
     return {
         "id": user.id,
         "username": user.username,
         "display_name": user.display_name or user.username,
         "role": user.role,
+        "expires_in": expires_in,
+        "idle_timeout": int(settings.session_idle_timeout_minutes) * 60,
     }
 
 
@@ -203,10 +214,40 @@ def _public_paths() -> set[str]:
         "/login",
         "/logout",
         "/health",
+        "/healthz",
         "/ready",
         "/favicon.ico",
         settings.event_path,  # 飞书事件回调:无 cookie,必须放行
     }
+
+
+def _slide_session(request: Request, response: Response, token: str) -> None:
+    """滑动续期会话:把 cookie 的 exp 推后一个空闲窗口(受绝对有效期封顶)。
+
+    静默失败(不抛异常):续期失败仅意味着用户更早需要重新登录。
+    """
+    settings = get_settings()
+    idle = int(settings.session_idle_timeout_minutes or 0) * 60
+    if idle <= 0:
+        return  # 0 = 关闭滑动续期,仅按 session_ttl_hours 到期
+    try:
+        payload = auth_service.parse_session(token)
+        new_token = auth_service.renew_session(
+            payload or {}, idle, int(settings.session_ttl_hours) * 3600
+        )
+        if not new_token or new_token == token:
+            return
+        response.set_cookie(
+            key=auth_service.COOKIE_NAME,
+            value=new_token,
+            max_age=idle,
+            httponly=True,
+            samesite="lax",
+            secure=settings.cookie_secure,
+            path="/",
+        )
+    except Exception as exc:  # noqa: BLE001 - 续期失败绝不影响正常响应
+        logger.warning("会话续期失败(忽略): %s", exc)
 
 
 def install_auth_middleware(app) -> None:
@@ -235,7 +276,11 @@ def install_auth_middleware(app) -> None:
                 user = resolve_user_from_request(request, session)
                 if user is not None:
                     request.state.user = user
-                    return await call_next(request)
+                    response = await call_next(request)
+                    # 滑动续期:每次有效访问把空闲窗口往后推。
+                    # 连续 SESSION_IDLE_TIMEOUT_MINUTES 无请求 → cookie 自然过期 → 需重新登录。
+                    _slide_session(request, response, token)
+                    return response
         finally:
             if session is not None:
                 session.close()

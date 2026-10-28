@@ -1,0 +1,10 @@
+[Unit]
+Description=Feishu health probe timer (every 5 min)
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

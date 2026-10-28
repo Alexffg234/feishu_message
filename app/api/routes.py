@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from lark_oapi.core.const import UTF_8
 from lark_oapi.core.model import RawRequest, RawResponse
 
-from app.core.config import STATIC_DIR, get_settings
+from app.core.config import STATIC_DIR, BASE_DIR, get_settings
 from app.core.db import check_db_connection, get_session
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
@@ -108,12 +108,96 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+_DEAD_LETTER_FILE = BASE_DIR / "data" / "dead_events.jsonl"
+
+
 @router.get("/ready")
 def ready() -> JSONResponse:
     ok = check_db_connection()
     return JSONResponse(
         content={"status": "ready" if ok else "unavailable"},
         status_code=200 if ok else 503,
+    )
+
+
+@router.get("/healthz")
+def healthz(db: Session = Depends(get_session)) -> JSONResponse:
+    """可观测性探活端点:一次给出『可用性 + 数据新鲜度 + 积压 + 死信』。
+
+    供 scripts/health_probe.py 定时拉取生成告警,也可人工查看:
+    - db:            数据库连通性
+    - queue_backlog: 事件队列积压(各 worker 独立,此处反映本进程队列)
+    - dead_letter:   死信文件(事件处理持续失败会累积在此)大小与行数
+    - last_message:  最近一条入库消息时间 + 距今秒数(数据新鲜度)
+    状态: 任一关键项异常 => "degraded",否则 "ok"。
+    """
+    db_ok = check_db_connection()
+
+    # 队列积压(本 worker 的进程内队列)
+    backlog = 0
+    try:
+        from app.services.feishu_handler import get_event_queue
+
+        backlog = get_event_queue().qsize()
+    except Exception:  # noqa: BLE001 - 队列不可用不算整体故障
+        backlog = -1
+
+    # 死信文件
+    dl_bytes = dl_lines = 0
+    try:
+        if _DEAD_LETTER_FILE.exists():
+            dl_bytes = _DEAD_LETTER_FILE.stat().st_size
+            with open(_DEAD_LETTER_FILE, encoding="utf-8") as f:
+                dl_lines = sum(1 for _ in f)
+    except OSError:
+        pass
+
+    # 最近一条消息(数据新鲜度)
+    last_msg_iso = None
+    last_msg_seconds = -1
+    try:
+        from sqlalchemy import text
+
+        row = db.execute(
+            text(
+                "SELECT MAX(received_at) FROM messages "
+                "UNION SELECT MAX(create_time) FROM messages "
+                "ORDER BY 1 DESC LIMIT 1"
+            )
+        ).scalar()
+        if row:
+            last_msg_iso = str(row)
+            # create_time 是毫秒时间戳字符串;received_at 是 ISO datetime,两种都算
+            import time as _t
+            from datetime import datetime as _dt
+
+            now = _t.time()
+            ts = None
+            raw = str(row)
+            try:
+                rep = int(raw)
+                ts = rep / 1000.0 if rep > 10**12 else float(rep)
+            except (TypeError, ValueError):
+                try:
+                    ts = _dt.fromisoformat(raw[:19]).timestamp()
+                except (TypeError, ValueError):
+                    ts = None
+            if ts is not None:
+                last_msg_seconds = max(0, int(now - ts))
+    except Exception:  # noqa: BLE001
+        last_msg_iso = None
+
+    bad = (not db_ok) or backlog < 0
+    return JSONResponse(
+        content={
+            "status": "degraded" if bad else "ok",
+            "db": db_ok,
+            "queue_backlog": backlog,
+            "dead_letter": {"bytes": dl_bytes, "lines": dl_lines},
+            "last_message": last_msg_iso,
+            "last_message_seconds_ago": last_msg_seconds,
+        },
+        status_code=200,
     )
 
 

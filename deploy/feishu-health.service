@@ -1,0 +1,12 @@
+[Unit]
+Description=Feishu health probe (every 5 min, alert on anomaly)
+After=network.target feishu-message.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/feishu_group_message
+# 拉本机 /healthz,异常时推飞书告警。webhook 优先取 config/.env 的 alert_webhook
+ExecStart=/opt/feishu_group_message/.venv/bin/python scripts/health_probe.py
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true

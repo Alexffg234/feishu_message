@@ -14,7 +14,7 @@ from functools import lru_cache
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.core.config import STATIC_DIR, get_settings
+from app.core.config import STATIC_DIR, get_settings, mask_db_url
 from app.core.db import SessionLocal, init_db
 from app.core.logging import setup_logging
 from app.services.feishu_handler import build_dispatcher
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     get_topic_summary_service().start()
     get_conv_stitch_service().start()
     logger.info("服务启动完成 host=%s port=%s db=%s",
-                settings.host, settings.port, settings.database_url)
+                settings.host, settings.port, mask_db_url(settings.database_url))
     if settings.auth_enabled:
         logger.info("访问控制已开启: 未登录将跳转 /login(飞书回调 %s 保持开放)",
                     settings.event_path)

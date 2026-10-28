@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_settings, mask_db_url
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def init_db() -> None:
     _ensure_segment_columns()
     _ensure_topic_summary_columns()
     _ensure_topic_group_columns()
-    logger.info("数据库表结构就绪: %s", get_settings().database_url)
+    logger.info("数据库表结构就绪: %s", mask_db_url(get_settings().database_url))
 
 
 def _ensure_message_group_columns() -> None:

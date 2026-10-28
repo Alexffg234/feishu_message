@@ -125,9 +125,13 @@ python scripts/create_user.py --list                   # 查看全部账号
 |---|---|---|
 | `AUTH_ENABLED` | `true` | 关闭即全站免登录(仅本地调试,生产勿关) |
 | `ALLOW_PUBLIC_REGISTER` | `true` | 关 false 后只能用 `create_user.py` 开号;**库里无账号时注册恒开放**,否则无法创建首个管理员 |
-| `SESSION_TTL_HOURS` | `12` | 登录态有效期 |
+| `SESSION_TTL_HOURS` | `12` | 登录态**绝对**有效期(小时)，从登录时刻算起，滑动续期也不会超过它 |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | `10` | **空闲超时**(分钟)：连续这么久没有任何请求即自动登出；置 `0` 表示只按绝对有效期失效 |
 | `SESSION_SECRET` | 空 | 会话签名密钥;留空自动生成并持久化到 `data/.session_secret`。**多实例部署必须显式配成同一个值** |
 | `COOKIE_SECURE` | `false` | 会话 cookie 是否仅 HTTPS 传输。**看浏览器访问的协议，不是看应用监听的协议**：站点对外是 http 就保持 `false`；对外是 https 必须置 `true`（即使用 nginx 做了 SSL 终结、FastAPI 本身只监听 127.0.0.1 的 http） |
+| `ALERT_WEBHOOK` | 空 | 飞书机器人群机器人 webhook。服务异常/数据不新鲜时由 `scripts/health_probe.py` 推送告警；留空则不推送 |
+| `ALERT_NO_MESSAGE_MINUTES` | `30` | 超过该分钟数没有新消息入库即视为「数据不新鲜」，触发告警；`0` 不检查 |
+| `ALERT_DEAD_LETTER_THRESHOLD` | `3` | 死信事件行数超过该值视为异常（事件持续处理失败） |
 
 ### 密码复杂度要求
 
@@ -358,10 +362,28 @@ GET /messages/topics?chat_id=oc_xxx&limit=20
 
 ## 鉴权提示
 
-`/` 根路径会返回服务健康信息：
+`/healthz` 提供**可观测性探活**（免登录），返回数据库连通、事件队列积压、死信数量、最近入库时间（数据新鲜度）：
 
 ```
-GET /       -> {"status":"running","messages_count":123, ...}
+GET /healthz -> {"status":"ok","db":true,"queue_backlog":0,"dead_letter":{"bytes":0,"lines":0},"last_message":"2026-10-26 09:58:51","last_message_seconds_ago":175192}
+```
+
+搭配告警脚本定时探活（服务器）：
+
+```bash
+# 手动试跑(dry-run 只打印不发)
+./.venv/bin/python scripts/health_probe.py --dry-run
+
+# 安装定时探活(每 5 分钟,异常推飞书告警)
+cp deploy/feishu-health.service deploy/feishu-health.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now feishu-health.timer
+systemctl list-timers feishu-health.timer
+```
+
+`/` 根路径已改为跳转总结页；旧的服务统计信息迁移到 `/api/stats`（需登录）。
+
+```
 GET /health -> {"status":"ok"}
 ```
 

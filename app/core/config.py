@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,6 +15,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def mask_db_url(url: str) -> str:
+    """脱敏数据库 URL:隐藏 user:password,仅保留协议+主机+库名。
+
+    防止含密码的连接串(如 mysql://root:xxx@host/db)被打印进日志/告警。
+    例: mysql+pymysql://root:GoGo2016@10.0.0.1:3306/db -> mysql+pymysql://root:***@10.0.0.1:3306/db
+    """
+    if not url:
+        return url or ""
+    # 匹配 //user:pass@ 并只保留 user,把 pass 换成 ***
+    return re.sub(r"(//[^@:/]+):[^@/]*(@)", r"\1:***\2", url)
 
 # 前端静态资源目录(CSS / JS / 页面模板)
 # 由 app/main.py 挂载到 /static,注意认证中间件需放行该前缀
@@ -102,8 +115,11 @@ class Settings(BaseSettings):
     # 是否开放自助注册;false 时只能用 scripts/create_user.py 建号
     # (库里尚无账号时,注册始终开放,保证首次部署能创建管理员)
     allow_public_register: bool = True
-    # 登录态有效期(小时)
+    # 登录态绝对有效期(小时):从登录那一刻算起,滑动续期也不会超过它
     session_ttl_hours: int = 12
+    # 空闲超时(分钟):连续这么久没有任何请求就自动登出(滑动续期窗口)。
+    # 0 = 不做滑动续期,只在 session_ttl_hours 到期后失效
+    session_idle_timeout_minutes: int = 10
     # 会话 cookie 签名密钥;留空则自动生成并持久化到 data/.session_secret
     # 生产建议显式配置(多机部署时各实例需一致,否则会互相踢下线)
     session_secret: str = ""
@@ -113,6 +129,14 @@ class Settings(BaseSettings):
     # ---------- 日志 ----------
     log_level: str = "INFO"
     log_file: str = ""  # 空=仅控制台; 否则同时写入文件(滚动)
+
+    # ---------- 健康探活告警(scripts/health_probe.py) ----------
+    # 飞书机器人 webhook(自定义机器人),用于服务异常/数据不新鲜时推送告警;留空=不推送
+    alert_webhook: str = ""
+    # 超过多少分钟没有新消息入库视为“数据不新鲜”,触发告警;0=不检查
+    alert_no_message_minutes: int = 30
+    # 死信文件行数超过多少视为异常(事件处理持续失败)
+    alert_dead_letter_threshold: int = 3
 
     # ---------- 内部 / 派生 ----------
     @property

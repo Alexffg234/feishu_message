@@ -221,6 +221,21 @@ a { color: var(--primary); }
   border: 1px solid rgba(63, 199, 154, .3);
 }
 
+.app-nav__session {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px dashed var(--stroke);
+  white-space: nowrap;
+}
+.app-nav__session.is-warning {
+  color: var(--danger-text);
+  border-color: rgba(242, 119, 122, .5);
+  background: var(--danger-bg);
+}
+
 .app-nav__logout {
   padding: 6px 13px;
   border: 1px solid var(--stroke);

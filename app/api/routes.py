@@ -21,7 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -79,8 +79,18 @@ def _parse_resp(raw: RawResponse) -> Response:
     )
 
 
-@router.get("/", response_model=StatsOut)
-def index(db: Session = Depends(get_session)) -> StatsOut:
+@router.get("/", include_in_schema=False)
+def index() -> RedirectResponse:
+    """根路径直接跳到主页面(总结页)。
+
+    未登录时认证中间件会先拦下跳 /login;已登录就进主页面,
+    而不是对着一坨统计 JSON。统计信息改由 /api/stats 提供。
+    """
+    return RedirectResponse(url="/summary", status_code=302)
+
+
+@router.get("/api/stats", response_model=StatsOut)
+def stats(db: Session = Depends(get_session)) -> StatsOut:
     settings = get_settings()
     count = MessageRepo(db).count()
     return StatsOut(

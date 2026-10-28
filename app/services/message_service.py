@@ -19,6 +19,7 @@ from app.dao.conversation_repo import ConversationRepo
 from app.models.message import Message
 from app.schemas.message import MessageCreate
 from app.services.image_service import get_image_service
+from app.services.user_name_service import get_user_name_service
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,14 @@ class MessageService:
         # 解析 @ 提及:飞书回调 text 里是占位符(如 @_user_1),真实名字在 msg.mentions[i].name。
         # 记录 key->真实名 映射,供展示/LLM 时把占位符替换成 "@真实姓名"。
         mentions = _extract_mentions(getattr(msg, "mentions", None) or [])
+        # 顺带把 mentions 里的 open_id->姓名 采进缓存(不调飞书,不受可用范围限制)。
+        # 任何异常只告警,绝不阻塞入库。
+        try:
+            get_user_name_service().cache_from_mentions(
+                getattr(msg, "mentions", None) or []
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("采集 @提及姓名失败(不影响入库): %s", e)
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):

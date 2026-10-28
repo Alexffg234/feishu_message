@@ -45,6 +45,38 @@ class UserNameService:
         name = self._resolve_and_cache(user_id)
         return name or user_id
 
+    # ------------------------------------------------------------ @提及采集
+    def cache_from_mentions(self, mention_events: list) -> int:
+        """从消息事件的 mentions 数组直接采集姓名写入缓存(不调飞书接口)。
+
+        回调里的 mentions 对象自带 {id(open_id), id_type, name},比通讯录反查更可靠:
+        外部群成员/不在可用范围内的用户,只要被 @ 过一次就能拿到姓名。
+        已有成功缓存的跳过;之前 failed 的会被覆盖为成功。
+
+        返回新写入的条数。任何异常只告警,不影响主流程。
+        """
+        pairs: list[tuple[str, str]] = []
+        for m in mention_events or []:
+            uid = (getattr(m, "id", None) or "").strip()
+            name = (getattr(m, "name", None) or "").strip()
+            id_type = getattr(m, "id_type", None) or "open_id"
+            # 我们库里存的是 open_id,其他 id 类型(如 union_id)不能当 key
+            if uid and name and id_type == "open_id":
+                pairs.append((uid, name))
+        if not pairs:
+            return 0
+
+        written = 0
+        for uid, name in pairs:
+            cached = self._cache_get(uid)
+            if cached:  # 已有成功姓名,跳过
+                continue
+            self._cache_put(uid, name, 0)
+            written += 1
+        if written:
+            logger.info("从 @提及 采集到 %d 个用户姓名", written)
+        return written
+
     def resolve_many(self, user_ids: list[str]) -> dict[str, str]:
         """批量把 open_id 解析成真实姓名,返回 {open_id: 姓名}。缺失/失败回退 open_id。"""
         result: dict[str, str] = {}

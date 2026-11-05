@@ -81,6 +81,16 @@ def get_current_user(request: Request, db: Session = Depends(get_session)) -> Us
     return user
 
 
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """依赖:在 get_current_user 基础上要求管理员角色。
+
+    对变更/付费等管理端点使用;member 访问抛 403。
+    """
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
 def resolve_user_from_request(request: Request, db: Session) -> User | None:
     """解析请求中的会话;无效/停用/已删除均返回 None(不抛异常)。"""
     token = request.cookies.get(auth_service.COOKIE_NAME)

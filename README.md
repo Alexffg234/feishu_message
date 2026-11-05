@@ -124,7 +124,7 @@ python scripts/create_user.py --list                   # 查看全部账号
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AUTH_ENABLED` | `true` | 关闭即全站免登录(仅本地调试,生产勿关) |
-| `ALLOW_PUBLIC_REGISTER` | `true` | 关 false 后只能用 `create_user.py` 开号;**库里无账号时注册恒开放**,否则无法创建首个管理员 |
+| `ALLOW_PUBLIC_REGISTER` | `false` | 默认关闭公开注册(安全默认),需建/管账号用 `create_user.py`;**库里无账号时注册恒开放**,否则无法创建首个管理员 |
 | `SESSION_TTL_HOURS` | `12` | 登录态**绝对**有效期(小时)，从登录时刻算起，滑动续期也不会超过它 |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | `10` | **空闲超时**(分钟)：连续这么久没有任何请求即自动登出；置 `0` 表示只按绝对有效期失效 |
 | `SESSION_SECRET` | 空 | 会话签名密钥;留空自动生成并持久化到 `data/.session_secret`。**多实例部署必须显式配成同一个值** |

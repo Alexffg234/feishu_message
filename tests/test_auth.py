@@ -47,6 +47,22 @@ def _uname(prefix: str = "u") -> str:
     return f"{prefix}{int(time.time() * 1000) % 100000000}"
 
 
+def _seed_user(username: str, password: str = "feishu2026x", role: str = "member") -> str:
+    """公开注册默认关闭后,直接经 create_user(CLI 同款路径)种账号。"""
+    from app.core.db import SessionLocal
+    from app.services import auth_service
+
+    with SessionLocal() as db:
+        auth_service.create_user(db, username, password, role=role)
+    return username
+
+
+def _login(client, username: str, password: str = "feishu2026x"):
+    r = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return r
+
+
 # ---------------------------------------------------------------- 未登录拦截
 def test_page_redirects_to_login(client):
     r = client.get("/summary", follow_redirects=False)
@@ -99,20 +115,19 @@ def test_register_first_user_is_admin(client):
 
 
 def test_register_rejects_duplicate_and_weak(client):
+    """公开注册关闭后,重复用户名/弱密码的校验由 create_user(CLI 同款路径)承接。"""
+    from app.core.db import SessionLocal
+    from app.services import auth_service
+
     name = _uname("dup")
-    assert client.post(
-        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
-    ).status_code == 200
-    # 重名
-    r = client.post(
-        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
-    )
-    assert r.status_code == 400
-    # 弱密码
-    r = client.post(
-        "/api/auth/register", json={"username": _uname("weak"), "password": "123"}
-    )
-    assert r.status_code == 400
+    with SessionLocal() as db:
+        auth_service.create_user(db, name, "feishu2026x")
+        # 重名 → ValueError(对应注册接口的 400)
+        with pytest.raises(ValueError):
+            auth_service.create_user(db, name, "feishu2026x")
+        # 弱密码 → ValueError
+        with pytest.raises(ValueError):
+            auth_service.create_user(db, _uname("weak"), "123")
 
 
 def test_password_complexity_rules():
@@ -137,32 +152,67 @@ def test_password_complexity_rules():
 
 
 def test_register_rejects_weak_password_variants(client):
-    """各类不合规密码均返回 400,并带上具体原因。"""
+    """各类不合规密码经 create_user 均抛 ValueError 并带具体原因。"""
+    from app.core.db import SessionLocal
+    from app.services import auth_service
+
     for pwd in ("abcdefgh", "12345678", "1111abcd", "abc12345", "password"):
-        r = client.post(
-            "/api/auth/register",
-            json={"username": _uname("bad"), "password": pwd},
-        )
-        assert r.status_code == 400, f"{pwd} 不应通过"
-        assert "密码" in r.json()["detail"]
+        with SessionLocal() as db:
+            with pytest.raises(ValueError) as exc_info:
+                auth_service.create_user(db, _uname("bad"), pwd)
+            assert "密码" in str(exc_info.value)
 
 
 def test_register_status_exposes_password_rules(client):
     data = client.get("/api/auth/register").json()
-    assert data["open"] is True
+    # 公开注册默认关闭:前面用例已占用库 → open=False
+    assert data["open"] is False
     assert data["min_len"] == 8
     assert isinstance(data["password_rules"], list) and len(data["password_rules"]) >= 3
     # 规则应出现在页面里(页面用后端下发的规则渲染清单)
     assert "同时包含字母和数字" in " ".join(data["password_rules"])
 
 
-def test_login_ok_then_access_page(client):
-    name = _uname("login")
-    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
-    client.post("/api/auth/logout")
+def test_register_status_open_when_db_empty():
+    """独立空库:即使 ALLOW_PUBLIC_REGISTER=false,库空时 open 仍为 True(引导首管理员)。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
-    r = client.post("/api/auth/login", json={"username": name, "password": "feishu2026x"})
-    assert r.status_code == 200, r.text
+    from app.core.config import get_settings
+    from app.models import Base
+    from app.services import auth_service
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    settings = get_settings()
+    assert settings.allow_public_register is False  # 确认新默认值
+
+    def _open(s):
+        return bool(settings.allow_public_register or (auth_service.count_users(s) == 0))
+
+    with Session() as s:
+        assert auth_service.count_users(s) == 0
+        assert _open(s) is True
+        auth_service.create_user(s, _uname("first"), "feishu2026x")
+    with Session() as s:
+        assert _open(s) is False
+
+
+def test_register_closed_returns_403(client):
+    """公开注册默认关闭:库已非空时再次自助注册 → 403。"""
+    r = client.post(
+        "/api/auth/register",
+        json={"username": _uname("blocked"), "password": "feishu2026x"},
+    )
+    assert r.status_code == 403
+    assert "自助注册已关闭" in r.json()["detail"]
+
+
+def test_login_ok_then_access_page(client):
+    name = _seed_user(_uname("login"))
+    _login(client, name)
+
     me = client.get("/api/auth/me")
     assert me.status_code == 200 and me.json()["username"] == name
 
@@ -181,9 +231,7 @@ def test_static_assets_reachable_without_login(client):
 
 
 def test_wrong_password_and_unknown_user_same_error(client):
-    name = _uname("pw")
-    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
-    client.post("/api/auth/logout")
+    name = _seed_user(_uname("pw"))
 
     r1 = client.post("/api/auth/login", json={"username": name, "password": "wrongpass"})
     r2 = client.post(
@@ -194,8 +242,8 @@ def test_wrong_password_and_unknown_user_same_error(client):
 
 
 def test_logout_clears_session(client):
-    name = _uname("out")
-    client.post("/api/auth/register", json={"username": name, "password": "feishu2026x"})
+    name = _seed_user(_uname("out"))
+    _login(client, name)
     assert client.get("/api/auth/me").status_code == 200
     client.post("/api/auth/logout")
     assert client.get("/api/auth/me").status_code == 401
@@ -211,10 +259,8 @@ def test_password_hash_roundtrip():
 
 
 def test_session_tamper_rejected(client):
-    name = _uname("sig")
-    r = client.post(
-        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
-    )
+    name = _seed_user(_uname("sig"))
+    r = _login(client, name)
     token = r.cookies[COOKIE_NAME]
     body, _, sig = token.rpartition(".")
     tampered = body + ".AAAA" + sig[4:]
@@ -275,11 +321,8 @@ def test_renew_session_slides_and_caps(client):
 
 def test_sliding_refresh_on_activity(client):
     """有访问时会话被滑动续期:响应里带回新 cookie,且有效期收敛到空闲窗口。"""
-    name = _uname("slide")
-    r = client.post(
-        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
-    )
-    assert r.status_code == 200
+    name = _seed_user(_uname("slide"))
+    r = _login(client, name)
     before = r.cookies[COOKIE_NAME]
 
     # 普通接口属于「用户活动」,应触发滑动续期(认证接口 /api/auth/* 不算)
@@ -300,10 +343,7 @@ def test_sliding_refresh_on_activity(client):
 
 def test_expired_session_logs_out(client):
     """会话过期后:接口 401、页面跳登录页。"""
-    name = _uname("exp")
-    assert client.post(
-        "/api/auth/register", json={"username": name, "password": "feishu2026x"}
-    ).status_code == 200
+    name = _seed_user(_uname("exp"))
 
     class _U:
         id = 1
@@ -314,3 +354,39 @@ def test_expired_session_logs_out(client):
     assert client.get("/api/auth/me").status_code == 401
     r = client.get("/summary", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"].startswith("/login")
+
+
+# ---------------------------------------------------------------- RBAC
+def test_rbac_member_forbidden_admin_allowed(client):
+    """member 访问管理(变更)端点 → 403;admin 访问同一端点 → 非 403。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    admin_name = _seed_user(_uname("rbacadmin"), role="admin")
+    member_name = _seed_user(_uname("rbacmember"), role="member")
+
+    app = create_app()
+    body = {"name": "硬件", "topics": ["屏幕"]}
+    with TestClient(app) as admin_client:
+        assert (
+            admin_client.post(
+                "/api/auth/login",
+                json={"username": admin_name, "password": "feishu2026x"},
+            ).status_code
+            == 200
+        )
+        r = admin_client.post("/api/topic_groups", json=body)
+        assert r.status_code != 403, r.text
+
+    with TestClient(app) as member_client:
+        assert (
+            member_client.post(
+                "/api/auth/login",
+                json={"username": member_name, "password": "feishu2026x"},
+            ).status_code
+            == 200
+        )
+        r = member_client.post("/api/topic_groups", json=body)
+        assert r.status_code == 403
+        assert "需要管理员权限" in r.json()["detail"]

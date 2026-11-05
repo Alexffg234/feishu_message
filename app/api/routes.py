@@ -30,11 +30,13 @@ from lark_oapi.core.model import RawRequest, RawResponse
 
 from app.core.config import STATIC_DIR, BASE_DIR, get_settings
 from app.core.db import check_db_connection, get_session
+from app.api.auth import require_admin
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
 from app.schemas.message import MessageGroupOut, MessageOut, StatsOut, TopicOut
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.models.user import User
 from app.services.message_service import MessageService
 from app.services.summary_service import get_summary_service
 from app.services.user_name_service import fill_tree_sender_names
@@ -375,8 +377,9 @@ async def api_topic_summary_regenerate(
     topic: str,
     chat_id: Optional[str] = None,
     db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> dict:
-    """强制重新生成某主题的 AI 分析(同步,约 5~15 秒)。"""
+    """强制重新生成某主题的 AI 分析(同步,约 5~15 秒,付费 LLM 调用,仅管理员)。"""
     from sqlalchemy import select
 
     from app.services.topic_summary_service import get_topic_summary_service
@@ -416,7 +419,11 @@ def api_topic_groups_list(db: Session = Depends(get_session)) -> dict:
 
 
 @router.post("/api/topic_groups")
-def api_topic_groups_upsert(body: TopicGroupIn, db: Session = Depends(get_session)) -> dict:
+def api_topic_groups_upsert(
+    body: TopicGroupIn,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     """创建/更新问题大类(name 唯一,topics 整体覆盖)。
 
     两级分组:填 parent(父组名)则本组作为其子类;仅含子类的顶级组 topics 可为空。
@@ -446,7 +453,11 @@ def api_topic_groups_upsert(body: TopicGroupIn, db: Session = Depends(get_sessio
 
 
 @router.delete("/api/topic_groups/{name}")
-def api_topic_groups_delete(name: str, db: Session = Depends(get_session)) -> dict:
+def api_topic_groups_delete(
+    name: str,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     from app.models.topic_group import TopicGroup
 
     row = db.query(TopicGroup).filter(TopicGroup.name == name).first()
@@ -474,7 +485,9 @@ def api_topic_aliases_list(db: Session = Depends(get_session)) -> dict:
 
 @router.post("/api/topic_aliases")
 def api_topic_aliases_upsert(
-    body: TopicAliasIn, db: Session = Depends(get_session)
+    body: TopicAliasIn,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> dict:
     """新建/更新一条别名收敛(同名 upsert)。alias/canonical 均做标签清洗。"""
     from app.models.topic_alias import TopicAlias
@@ -499,7 +512,11 @@ def api_topic_aliases_upsert(
 
 
 @router.delete("/api/topic_aliases/{alias}")
-def api_topic_aliases_delete(alias: str, db: Session = Depends(get_session)) -> dict:
+def api_topic_aliases_delete(
+    alias: str,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     """删除一条别名收敛。"""
     from app.models.topic_alias import TopicAlias
 
@@ -710,7 +727,11 @@ def _walk_tree(node: dict):
 
 
 @router.post("/api/cases/{case_id}/merge")
-def api_case_merge(case_id: int, db: Session = Depends(get_session)) -> dict:
+def api_case_merge(
+    case_id: int,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     """管理员确认:把案例组物理合并为一条对话(并入最早会话为根)。"""
     from app.services.case_merge import merge_case
 
@@ -722,7 +743,11 @@ def api_case_merge(case_id: int, db: Session = Depends(get_session)) -> dict:
 
 
 @router.post("/api/cases/{case_id}/unlink")
-def api_case_unlink(case_id: int, db: Session = Depends(get_session)) -> dict:
+def api_case_unlink(
+    case_id: int,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     """解绑案例组:共享该 case_id 的会话全部归 0(可回滚,数据零损失)。"""
     from app.services.case_merge import unlink_case
 
@@ -757,7 +782,9 @@ def api_topic_knowledge_get(topic: str, db: Session = Depends(get_session)) -> d
 
 @router.post("/api/topic_knowledge")
 def api_topic_knowledge_upsert(
-    body: TopicKnowledgeIn, db: Session = Depends(get_session)
+    body: TopicKnowledgeIn,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> dict:
     """写入/覆盖某 topic 的参考知识库(标准排查手册)。"""
     from datetime import datetime, timezone
@@ -782,7 +809,11 @@ def api_topic_knowledge_upsert(
 
 
 @router.delete("/api/topic_knowledge/{topic}")
-def api_topic_knowledge_delete(topic: str, db: Session = Depends(get_session)) -> dict:
+def api_topic_knowledge_delete(
+    topic: str,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
     from app.models.topic_knowledge import TopicKnowledge
 
     row = db.query(TopicKnowledge).filter(TopicKnowledge.topic == topic).first()

@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     auth_enabled: bool = True
     # 是否开放自助注册;false 时只能用 scripts/create_user.py 建号
     # (库里尚无账号时,注册始终开放,保证首次部署能创建管理员)
-    allow_public_register: bool = True
+    allow_public_register: bool = False
     # 登录态绝对有效期(小时):从登录那一刻算起,滑动续期也不会超过它
     session_ttl_hours: int = 12
     # 空闲超时(分钟):连续这么久没有任何请求就自动登出(滑动续期窗口)。

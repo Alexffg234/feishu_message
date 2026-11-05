@@ -341,10 +341,13 @@ class EventQueue:
 
     # ------------------------------------------------------------ outbox 处理
     def _claim_next(self) -> "_ClaimedRow | None":
-        """原子认领一个可处理行:pending 或 到期 retrying → processing。
+        """原子认领一个可处理行:pending / 到期 retrying / 过期 processing。
 
         用 UPDATE ... WHERE status/retry_at 条件做乐观守卫,多 worker 并发时
         只有一个能抢到(rowcount=1),其余抢锁失败返回 None(交给下次轮询)。
+
+        processing 行在 retry_at_ms(处理租约到期时刻)之后视为疑似崩溃,可回收
+        重新认领,保证 worker 崩溃时不丢处理中的事件。认领时保留原 attempt。
 
         返回轻量记录(会话已关闭,避免 DetachedInstanceError),字段与 ORM 行对齐。
         """
@@ -353,7 +356,7 @@ class EventQueue:
             row = (
                 session.query(EventOutbox)
                 .filter(
-                    EventOutbox.status.in_(["pending", "retrying"]),
+                    EventOutbox.status.in_(["pending", "retrying", "processing"]),
                     EventOutbox.retry_at_ms <= now,
                 )
                 .order_by(EventOutbox.id)
@@ -368,7 +371,7 @@ class EventQueue:
                 update(EventOutbox)
                 .where(
                     EventOutbox.id == row.id,
-                    EventOutbox.status.in_(["pending", "retrying"]),
+                    EventOutbox.status.in_(["pending", "retrying", "processing"]),
                     EventOutbox.retry_at_ms <= now,
                 )
                 .values(

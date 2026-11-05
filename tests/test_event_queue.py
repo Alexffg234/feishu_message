@@ -304,3 +304,30 @@ def test_persistent_survives_restart():
     assert _wait(lambda: got)
     assert _wait(lambda: _outbox_rows(Session)[0].status == "done")
     q2.stop()
+
+
+def test_persistent_crash_reclaims_processing():
+    """worker 处理中崩溃:若行停在 processing 且租约已过期,新实例应回收重处理。"""
+    Session, _ = _make_session_factory()
+
+    # 模拟:事件已落库并进入 processing,但持有方在提交结果前崩溃(租约过期)
+    from app.models import EventOutbox
+
+    q1 = EventQueue(process_fn=lambda x: None, session_factory=Session)
+    assert q1.submit(_make_event())
+    with Session() as s:
+        s.query(EventOutbox).update(
+            {
+                EventOutbox.status: "processing",
+                EventOutbox.retry_at_ms: int(time.time() * 1000) - 5000,  # 租约已过期
+            }
+        )
+        s.commit()
+
+    got: list = []
+    q2 = EventQueue(process_fn=lambda x: got.append(x), session_factory=Session,
+                    claim_lease_ms=60_000)
+    q2.start()
+    assert _wait(lambda: got)
+    assert _wait(lambda: _outbox_rows(Session)[0].status == "done")
+    q2.stop()

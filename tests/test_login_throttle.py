@@ -109,3 +109,72 @@ def test_fallback_to_memory_when_db_down():
     assert th.locked("dave") is True
     th.reset("dave")
     assert th.locked("dave") is False
+
+
+def test_record_fail_concurrent_atomic_increment():
+    """20 线程并发对同一新 key 各记一次失败,持久化计数必须恰为 20。
+
+    回归:旧实现是非原子读-改-写,并发首次 record_fail 会因主键冲突被
+    `except Exception` 误判为 DB down 而只落到进程内兜底,持久化计数被
+    严重低估(曾复现 fail_count=2)。修复后原子递增须跨线程/worker 可见。
+
+    用「每线程独立连接」的文件式 SQLite(非共享单连接),才能真实复现
+    多 worker 并发;SQLite 写锁由 busy timeout 串行化,正确性仍成立。
+    """
+    import os
+    import tempfile
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import NullPool
+
+    from app.services.auth_service import LoginThrottle
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        engine = create_engine(
+            f"sqlite:///{path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+            poolclass=NullPool,  # 每个线程拿到独立连接
+        )
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+
+        clock = FakeClock()
+        th = LoginThrottle(
+            max_fails=1000, window=300, session_factory=Session, now_func=clock
+        )
+        key = "concurrent_user"
+        n = 20
+        barrier = threading.Barrier(n)
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait()  # 尽量同时起跑,放大竞态窗口
+                th.record_fail(key)
+            except BaseException as exc:  # noqa: BLE001 - 收集异常以便断言
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"并发 record_fail 不应抛异常: {errors}"
+        with Session() as s:
+            row = s.get(LoginFail, key)
+            assert row is not None and row.fail_count == n, (
+                f"持久化计数应为 {n},实际 {row.fail_count if row else None}"
+            )
+        # 未误走 mem 兜底:该 key 不应出现在进程内 dict
+        assert key not in th._mem
+    finally:
+        engine.dispose()
+        try:
+            os.remove(path)
+        except OSError:
+            pass

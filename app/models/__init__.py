@@ -14,6 +14,7 @@ from app.models.topic_alias import TopicAlias  # noqa: F401
 from app.models.app_lock import SchedulerLock  # noqa: F401
 from app.models.topic_classify_lock import TopicClassifyLock  # noqa: F401
 from app.models.login_fail import LoginFail  # noqa: F401
+from app.models.event_outbox import EventOutbox  # noqa: F401
 from app.models.user import User  # noqa: F401
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "SchedulerLock",
     "TopicClassifyLock",
     "LoginFail",
+    "EventOutbox",
     "User",
 ]

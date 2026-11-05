@@ -47,6 +47,9 @@ def get_event_queue() -> EventQueue:
         maxsize=1000,
         dead_letter=str(BASE_DIR / "data" / "dead_events.jsonl"),
         retry_delays=(5.0, 30.0, 120.0),
+        # 注入 SessionLocal 启用 outbox 持久化(at-least-once):
+        # 事件先落库再应答,worker 崩溃/重启后可恢复,不再丢失在途事件。
+        session_factory=_session_factory(),
     )
 
 

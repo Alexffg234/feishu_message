@@ -17,13 +17,17 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
+from app.models.topic_classify_lock import TopicClassifyLock
 from app.services.group_merge import merge_topic_group
 from app.services.label_norm import clean_label as _clean_label  # noqa: F401 (外部/测试引用)
 from app.services.label_norm import _STOP_LABELS  # noqa: F401 (兼容引用)
@@ -51,6 +55,8 @@ _SYSTEM_PROMPT = (
 
 # 分类失败后,同一组的最小重试间隔(秒),防止 LLM 故障时反复打
 _RETRY_COOLDOWN = 60
+# 在途租约最长持有时间(秒):超过即视为持有方崩溃,其他 worker 可接管重试
+_CLAIM_LEASE_SECONDS = 300
 # 送给 LLM 的每组消息条数上限(控制 token)
 _MAX_ROWS_PROMPT = 20
 # 送给 LLM 的组前上下文消息条数(帮助判断是否延续前面讨论)
@@ -108,33 +114,153 @@ class TopicService:
         return self._llm is not None
 
     # ---------------------------------------------------------------- 分类
-    def schedule_group(self, chat_id: str, root_message_id: str) -> bool:
-        """为某回复链组调度异步主题分类。
+    def schedule_group(
+        self, chat_id: str, root_message_id: str, force: bool = False
+    ) -> bool:
+        """为某回复链组调度异步主题分类(跨 worker 去重)。
 
-        带去重(同一组已在队列中则跳过)与失败冷却。返回是否已调度。
+        带去重:同组已在队列 / 已分类(done)/ 他人正在分类(在途租约)/
+        失败冷却中均跳过;force=True 跳过全部去重强制重打。返回是否已调度。
         """
         if not self.enabled:
             return False
         key = (chat_id, root_message_id)
+        # 进程内快速去重/冷却(单 worker 内第一道防线,兼供 wait_idle 使用)
         now = time.monotonic()
         with self._lock:
-            if key in self._pending:
+            if not force and key in self._pending:
                 return False
-            failed_at = self._last_failure.get(key)
-            if failed_at is not None and now - failed_at < _RETRY_COOLDOWN:
+            if not force and now - self._last_failure.get(key, 0.0) < _RETRY_COOLDOWN:
                 return False
+        # DB 级租约抢占(跨 worker 去重,防止两 worker 各调一次 LLM)
+        if not self._try_claim(chat_id, root_message_id, force=force):
+            return False
+        with self._lock:
             self._pending.add(key)
         self._executor.submit(self._classify_worker, chat_id, root_message_id)
         return True
+
+    def _try_claim(
+        self, chat_id: str, root_message_id: str, force: bool = False
+    ) -> bool:
+        """以 DB 租约抢占本组的分类权,True=本进程中标、应执行分类。
+
+        规则:
+        - 组已带标签(历史数据无锁记录)→ 不重复分类(force 除外)
+        - 锁记录 status='done'(已分类完成)→ 跳过(force 除外)
+        - status='pending' 且租约在途/失败冷却中 → 跳过(他人正处理)
+        - status='pending' 且租约过期(疑似崩溃)/冷却已过 → 接管重试
+        - 无锁记录 → INSERT 抢占;唯一键冲突=并发下他人已抢先 → 跳过
+        DB 异常时降级为允许(进程内去重仍兜底),不阻断入库调度。
+        """
+        if not force and self._group_has_topic(chat_id, root_message_id):
+            return False
+        now = datetime.now(timezone.utc)
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    select(TopicClassifyLock).where(
+                        TopicClassifyLock.chat_id == chat_id,
+                        TopicClassifyLock.root_message_id == root_message_id,
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    if not force and row.status == "done":
+                        return False
+                    if not force and not self._can_retake(row, now):
+                        return False
+                    # 接管(冷却已过 / 崩溃恢复 / force 重打)
+                    row.status = "pending"
+                    row.claimed_at = now
+                    row.retry_at = None
+                    session.commit()
+                    return True
+                # 无锁记录:INSERT 抢占;并发下唯一键冲突会被下方 except 捕获
+                session.add(
+                    TopicClassifyLock(
+                        chat_id=chat_id,
+                        root_message_id=root_message_id,
+                        status="pending",
+                        claimed_at=now,
+                    )
+                )
+                session.commit()
+                return True
+        except IntegrityError:
+            return False  # 并发下另一 worker 已抢先建锁,跳过
+        except Exception:  # noqa: BLE001 - DB 不可用,降级为允许,进程内去重兜底
+            logger.warning(
+                "主题分类租约 DB 不可用,退化进程内去重 %s/%s", chat_id, root_message_id
+            )
+            return True
+
+    def _can_retake(self, row: TopicClassifyLock, now: datetime) -> bool:
+        """租约是否允许被当前 worker 接管(冷却已过或疑似崩溃)。"""
+        if row.retry_at is not None:
+            retry = row.retry_at
+            if retry.tzinfo is None:  # SQLite 不存时区,裸时间按 UTC 解释
+                retry = retry.replace(tzinfo=timezone.utc)
+            return retry <= now
+        claimed = row.claimed_at
+        if claimed.tzinfo is None:
+            claimed = claimed.replace(tzinfo=timezone.utc)
+        return (now - claimed).total_seconds() >= _CLAIM_LEASE_SECONDS
+
+    def _group_has_topic(self, chat_id: str, root_message_id: str) -> bool:
+        """该回复链组是否已带主题标签(已分类的历史组不重复调度)。"""
+        try:
+            with self._session_factory() as session:
+                return MessageRepo(session).group_has_topic(chat_id, root_message_id)
+        except Exception:  # noqa: BLE001 - DB 异常按未分类处理,由租约兜底
+            return False
+
+    def _mark_lock_done(self, chat_id: str, root_message_id: str) -> None:
+        """分类成功后把租约标记为 done,幂等跳过后续重复调度。"""
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    select(TopicClassifyLock).where(
+                        TopicClassifyLock.chat_id == chat_id,
+                        TopicClassifyLock.root_message_id == root_message_id,
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    row.status = "done"
+                    row.claimed_at = datetime.now(timezone.utc)
+                    row.retry_at = None
+                    session.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning("标记主题分类 done 失败 %s/%s", chat_id, root_message_id)
+
+    def _mark_lock_retry(self, chat_id: str, root_message_id: str) -> None:
+        """分类失败后进入冷却,期间其他 worker 不重复打同一组。"""
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    select(TopicClassifyLock).where(
+                        TopicClassifyLock.chat_id == chat_id,
+                        TopicClassifyLock.root_message_id == root_message_id,
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    row.status = "pending"
+                    row.retry_at = datetime.now(timezone.utc) + timedelta(
+                        seconds=_RETRY_COOLDOWN
+                    )
+                    session.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning("标记主题分类冷却失败 %s/%s", chat_id, root_message_id)
 
     def _classify_worker(self, chat_id: str, root_message_id: str) -> None:
         key = (chat_id, root_message_id)
         try:
             self.classify_group(chat_id, root_message_id)
+            self._mark_lock_done(chat_id, root_message_id)
         except Exception:  # noqa: BLE001
             logger.exception("主题分类失败 %s/%s", chat_id, root_message_id)
             with self._lock:
                 self._last_failure[key] = time.monotonic()
+            self._mark_lock_retry(chat_id, root_message_id)
         finally:
             with self._lock:
                 self._pending.discard(key)

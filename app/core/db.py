@@ -64,6 +64,8 @@ def init_db() -> None:
     """建表(若不存在)并为存量表补齐回复分组字段。生产可用 Alembic 迁移替代。"""
     from app.models import Base  # 导入包即注册全部模型(含 conversations/message_links)
 
+    # create_all 幂等:已注册模型(含 topic_classify_locks / login_fails 等协调表)
+    # 缺失即建表,已存在则跳过,多 worker 各自启动无害。
     Base.metadata.create_all(bind=engine)
     _ensure_message_group_columns()
     _ensure_conversation_columns()

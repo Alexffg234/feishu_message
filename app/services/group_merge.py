@@ -16,13 +16,13 @@ from __future__ import annotations
 import logging
 import threading
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
-from app.models.conversation import MessageLink
+from app.models.conversation import Conversation, MessageLink
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def merge_groups(
     repo = MessageRepo(session)
     convo = ConversationRepo(session)
 
+    # 快速无操作判断:源/目标组存在性(不持锁,仅用于提前返回)
     source_rows = repo.list_by_root(source_root, chat_id)
     target_rows = repo.list_by_root(target_root, chat_id)
     if not source_rows or not target_rows:
@@ -77,9 +78,25 @@ def merge_groups(
         )
         session.flush()
 
+    # DB 级互斥:锁住目标对话行,跨 worker 并发 merge 同一目标时串行化。
+    # MySQL/PostgreSQL 下 WITH FOR UPDATE 生效(行锁);SQLite 下为整体表写锁,
+    # 叠加进程内 _merge_lock 仍保证安全。锁持至本事务 commit。
+    locked_conv = session.execute(
+        select(Conversation)
+        .where(Conversation.id == target_conv.id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if locked_conv is None:
+        return False  # 目标对话已被并发删除
+
     source_conv = convo.get(chat_id, source_root)
 
     with _merge_lock:
+        # 关键:持锁后重读源组。并发下先到者已归并,源组消息已移到目标 →
+        # 此时为空,幂等返回 False,避免重复删同一源对话/重复搬消息。
+        source_rows = repo.list_by_root(source_root, chat_id)
+        if not source_rows:
+            return False
         # 1) 消息改挂目标组
         for m in source_rows:
             m.root_message_id = target_root

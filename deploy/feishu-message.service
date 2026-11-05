@@ -7,7 +7,13 @@ Type=simple
 # 项目部署目录(根据实际路径修改)
 WorkingDirectory=/opt/feishu_group_message
 # 使用 gunicorn 多 worker 运行 FastAPI
-# 注意: --workers 建议 2-4;如需保持事件顺序可用 1 或使用 --worker-class gthread
+# 多 worker 协调说明(H2):
+# - 主题分类、同主题归并、登录限流均已 DB 化互斥(跨 worker 正确),
+#   可放心使用 --workers 2~4 提高吞吐。
+# - 事件队列每 worker 独立 FIFO;跨 worker 不保证同一 chat 的事件严格有序。
+#   解析已做容错(message_id 唯一索引幂等 + 回复消息用事件 root_id 兜底锚组),
+#   仅「同人连发轮次合并」的归组质量在乱序时可能略有偏差(无损,不丢数据)。
+#   如需严格按 chat 保序,改 --workers 1 或 --worker-class gthread(单进程多线程)。
 ExecStart=/opt/feishu_group_message/.venv/bin/gunicorn app.main:app \
     --bind 127.0.0.1:8008 \
     --workers 2 \

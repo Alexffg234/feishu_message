@@ -27,6 +27,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import BASE_DIR, get_settings
+from app.core.db import SessionLocal
+from app.models.login_fail import LoginFail
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -361,36 +363,100 @@ def renew_session(token_payload: dict, idle_seconds: int, max_ttl_seconds: int) 
 
 # ---------------------------------------------------------------- 登录限流
 class LoginThrottle:
-    """进程内登录失败计数:同一用户名连续失败超限后冷却。"""
+    """跨 worker 共享的登录失败限流(DB 主存储 + 进程内降级)。
 
-    def __init__(self, max_fails: int = _MAX_FAILS, window: int = _FAIL_WINDOW_SEC):
+    同一用户名(小写 key)连续失败超限后,在窗口内锁定;
+    成功登录即清空计数。多 gunicorn worker 共享 login_fails 表,
+    暴力破解不会被 worker 数放大。
+    语义与旧进程内实现一致:连续失败 _MAX_FAILS 次,窗口 _FAIL_WINDOW_SEC
+    内锁定;窗口内持续失败则滑动续延。
+    DB 不可用时降级为进程内 dict,保证不阻断登录校验主流程。
+    """
+
+    def __init__(
+        self,
+        max_fails: int = _MAX_FAILS,
+        window: int = _FAIL_WINDOW_SEC,
+        session_factory=None,
+        now_func=time.time,
+    ):
         self._max = max_fails
         self._window = window
+        self._session_factory = session_factory or SessionLocal
+        self._now = now_func
+        # 进程内降级存储与互斥(DB 不可用时兜底)
         self._lock = threading.Lock()
-        self._fails: dict[str, tuple[int, float]] = {}
+        self._mem: dict[str, tuple[int, float]] = {}
 
     def locked(self, key: str) -> bool:
-        with self._lock:
-            self._evict()
-            count, last = self._fails.get(key, (0, 0.0))
-            if count >= self._max and time.monotonic() - last < self._window:
-                return True
-            return False
+        """是否已锁定(连续失败超限且在窗口内)。"""
+        try:
+            return self._locked_db(key)
+        except Exception:  # noqa: BLE001 - DB 不可用降级进程内
+            with self._lock:
+                self._evict_mem()
+                count, last = self._mem.get(key, (0, 0.0))
+                return count >= self._max and self._now() - last < self._window
 
     def record_fail(self, key: str) -> None:
-        with self._lock:
-            count, _last = self._fails.get(key, (0, 0.0))
-            self._fails[key] = (count + 1, time.monotonic())
+        """记录一次登录失败(窗口滑动计数)。"""
+        try:
+            self._record_fail_db(key)
+        except Exception:  # noqa: BLE001 - DB 不可用降级进程内
+            with self._lock:
+                count, _last = self._mem.get(key, (0, 0.0))
+                self._mem[key] = (count + 1, self._now())
 
     def reset(self, key: str) -> None:
-        with self._lock:
-            self._fails.pop(key, None)
+        """登录成功后清空失败计数。"""
+        try:
+            self._reset_db(key)
+        except Exception:  # noqa: BLE001 - DB 不可用降级进程内
+            with self._lock:
+                self._mem.pop(key, None)
 
-    def _evict(self) -> None:
-        now = time.monotonic()
-        for k, (_c, last) in list(self._fails.items()):
+    # ------------------------------------------------------------ DB 实现
+    def _locked_db(self, key: str) -> bool:
+        now_ms = int(self._now() * 1000)
+        with self._session_factory() as session:
+            row = session.get(LoginFail, key)
+            if row is None:
+                return False
+            return row.fail_count >= self._max and now_ms < row.window_expires_at_ms
+
+    def _record_fail_db(self, key: str) -> None:
+        now_ms = int(self._now() * 1000)
+        with self._session_factory() as session:
+            row = session.get(LoginFail, key)
+            if row is None:
+                row = LoginFail(
+                    username=key,
+                    fail_count=1,
+                    window_expires_at_ms=now_ms + self._window * 1000,
+                )
+                session.add(row)
+            else:
+                # 上一次失败仍在窗口内 → 递增;已过窗口 → 重新计数
+                if now_ms < row.window_expires_at_ms:
+                    row.fail_count += 1
+                else:
+                    row.fail_count = 1
+                row.window_expires_at_ms = now_ms + self._window * 1000
+            session.commit()
+
+    def _reset_db(self, key: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(LoginFail, key)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    # ------------------------------------------------------------ 进程内降级
+    def _evict_mem(self) -> None:
+        now = self._now()
+        for k, (_c, last) in list(self._mem.items()):
             if now - last >= self._window:
-                self._fails.pop(k, None)
+                self._mem.pop(k, None)
 
 
 _throttle = LoginThrottle()

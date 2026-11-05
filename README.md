@@ -242,6 +242,13 @@ ngrok http 8008
 python main.py
 ```
 
+> **多 worker 协调(生产 `gunicorn --workers 2`)**:主题分类(LLM)、同主题归并、
+> 登录限流均已 DB 化互斥,跨 worker 正确,可放心多 worker 提高吞吐。
+> 事件队列为每 worker 独立 FIFO,跨 worker 不保证同一 chat 严格有序;解析已容错
+> (message_id 唯一索引幂等 + 回复消息用事件 root_id 兜底锚组),仅「同人连发轮次合并」
+> 的归组质量在乱序时可能略有偏差(不丢数据)。如需严格按 chat 保序,
+> 改 `--workers 1` 或 `--worker-class gthread` 即可。
+
 ### 5. 把机器人加进目标群
 
 在飞书里把应用机器人添加到你想要采集消息的群，之后群里的消息就会实时写入 `storage/messages.jsonl`。

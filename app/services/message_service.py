@@ -18,6 +18,7 @@ from app.dao.message_repo import MessageRepo
 from app.dao.conversation_repo import ConversationRepo
 from app.models.message import Message
 from app.schemas.message import MessageCreate
+from app.services.case_key import extract_case_key
 from app.services.image_service import get_image_service
 from app.services.user_name_service import get_user_name_service
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
@@ -228,6 +229,9 @@ class MessageService:
             parent_message_id=create.parent_message_id,
             root_message_id=self._resolve_root(create),
             raw=create.raw,
+            # 设备标识锚点(阶段二):从文本抽取,供同一案例确定性归并。
+            # 纯规则、零 LLM 成本;抽取失败留空不影响入库。
+            case_key=extract_case_key(create.text or ""),
         )
         try:
             self._repo.insert(msg)

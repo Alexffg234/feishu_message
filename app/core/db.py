@@ -70,6 +70,7 @@ def init_db() -> None:
     _ensure_segment_columns()
     _ensure_topic_summary_columns()
     _ensure_topic_group_columns()
+    _ensure_case_key_column()
     logger.info("数据库表结构就绪: %s", mask_db_url(get_settings().database_url))
 
 
@@ -206,6 +207,31 @@ def _ensure_topic_group_columns() -> None:
                 )
             )
             logger.info("topic_groups 表新增列 parent")
+
+
+def _ensure_case_key_column() -> None:
+    """轻量迁移:为存量 messages 表补 case_key 列(设备标识锚点)。
+
+    case_key 默认空串=未识别;由入库/回填脚本统一从消息文本抽取。
+    新建表上 create_all 已含该列,这里只处理存量库。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "messages" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("messages")}
+    if "case_key" in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "ALTER TABLE messages ADD COLUMN case_key "
+                "VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+        logger.info("messages 表新增列 case_key")
 
 
 def check_db_connection() -> bool:

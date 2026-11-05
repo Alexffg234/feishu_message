@@ -98,6 +98,9 @@ class Message(Base):
     block_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
+    # 设备标识锚点(阶段二):从消息文本抽取的 UUID/SN/MAC/IP,用于「同一故障案例」确定性归并。
+    # 空=未识别。归并/缝合时 case_key 相等(且非空)即视为同一案例,不依赖 LLM。
+    case_key: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
     # 原始结构化数据(图片/文件等附加字段)
     # 用 Optional[dict] 而非 dict | None,兼容 Python 3.9(SQLAlchemy 需运行时解析标注)
     raw: Mapped[Optional[dict]] = mapped_column(JSONText, nullable=True)

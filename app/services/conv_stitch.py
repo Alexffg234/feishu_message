@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.services.case_key import conversation_case_key
 from app.services.group_merge import merge_groups
 from app.services.llm import LLMError
 
@@ -126,6 +127,27 @@ def _list_conversations(session: Session, chat_id: str) -> list[tuple[Conversati
     return result
 
 
+def _plan_case_key_pairs(convs_rows: list[tuple[Conversation, list[Message]]]) -> list[tuple[int, int]]:
+    """确定性锚点:窗口内 case_key 相等(非空)的会话判定为同一案例。
+
+    返回 1 基窗口内 (源, 目标) 对,目标=同一 case_key 最早会话。
+    同一机器编号/UUID/MAC 是同一案例的最强证据,无需 LLM 判定。
+    """
+    groups: dict[str, list[int]] = {}
+    for i, (_c, rows) in enumerate(convs_rows, 1):
+        key = conversation_case_key(rows)
+        if key:
+            groups.setdefault(key, []).append(i)
+    pairs: list[tuple[int, int]] = []
+    for _key, idxs in groups.items():
+        if len(idxs) < 2:
+            continue
+        tgt = idxs[0]  # 时间最早
+        for g in idxs[1:]:
+            pairs.append((g, tgt))
+    return pairs
+
+
 def plan_stitches(
     session: Session,
     chat_id: str,
@@ -133,6 +155,9 @@ def plan_stitches(
 ) -> list[tuple[int, int]]:
     """规划会话缝合并对,返回 [(源会话id, 目标会话id)],目标=同组最早会话。
 
+    决策分层(阶段二):
+    - 确定性锚点优先:窗口内 case_key 相等(非空)的会话直接判为同一案例,不调 LLM;
+    - 其余(无 case_key 或不同) 才交 LLM 窗口判定。
     每个窗口的合并集合独立解析(不做跨窗传递闭包,防链式放大过度合并),
     每个 (源,目标) 对再过主题冲突护栏。
     只读不改库,供 dry-run 预览;llm 为空或会话不足 2 个时返回空。
@@ -149,6 +174,30 @@ def plan_stitches(
         window = convs[start : start + _BATCH_SIZE]
         if len(window) < 2:
             continue
+
+        # ---- 确定性通道:同 case_key 直接合并,节省 LLM 且稳定 ----
+        # 同一 case_key 组内的多个源会话都可并入同一目标;仅源被判过(已并入他组)才跳过
+        _window_claimed = False
+        for src_wi, tgt_wi in _plan_case_key_pairs(window):
+            src_g, tgt_g = start + src_wi - 1, start + tgt_wi - 1
+            if src_g in claimed:
+                continue
+            src_c, tgt_c = window[src_wi - 1][0], window[tgt_wi - 1][0]
+            if not _pair_allowed(src_c, tgt_c, chat_id):
+                continue
+            pairs.append((src_c.id, tgt_c.id))
+            claimed.add(src_g)
+            _window_claimed = True
+            logger.info(
+                "会话缝合(确定性 case_key) %s: #%d -> #%d 同一设备",
+                chat_id, src_c.id, tgt_c.id,
+            )
+        if _window_claimed:
+            # 本窗口已有确定性归属,不再对该窗口跑 LLM(避免重复判定)
+            # 其余无 case_key 的会话在相邻重叠窗口(步进重叠1)仍会被判定
+            continue
+
+        # ---- LLM 通道:无确定性锚点才判定 ----
         blocks = []
         for i, (c, rows) in enumerate(window, 1):
             blocks.append(

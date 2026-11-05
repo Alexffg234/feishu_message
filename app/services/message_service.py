@@ -66,20 +66,7 @@ class MessageService:
 
         # 解析消息内容
         text, raw = _parse_content(msg.message_type or "", msg.content or "")
-
-        # 图片/视频消息:把资源 file_key 下载上传七牛,生成可展示 URL 存入 raw。
-        # 未配置七牛/下载失败则优雅降级(保留 file_key,不阻塞入库)。
         msg_type = msg.message_type or ""
-        if isinstance(raw, dict):
-            if msg_type == "image":
-                _resolve_image(raw, msg.message_id or "")
-            elif msg_type == "media":
-                _resolve_video(raw, msg.message_id or "")
-            elif msg_type == "file":
-                _resolve_file(raw, msg.message_id or "")
-            elif msg_type == "post":
-                _resolve_post_images(raw, msg.message_id or "")
-
 
         # 解析回复关系(仅回复消息带 parent_id / root_id)
         parent_id = getattr(msg, "parent_id", None) or ""
@@ -117,7 +104,24 @@ class MessageService:
             raw=raw,
         )
 
-        return self.save_message(create)
+        saved = self.save_message(create)
+        # 媒体消息异步解析(H5):consumer 只做快速落库(URL 留空),媒体下载上传交给
+        # 独立 worker 并发完成并回填。仅当确实新写入且含媒体时才入队;未启动/失败
+        # → URL 留空,绝不阻塞或中断消息落库。
+        if saved and _has_media(msg_type, raw):
+            self._enqueue_media(chat_id, msg.message_id or "", msg_type, raw)
+        return saved
+
+    def _enqueue_media(
+        self, chat_id: str, message_id: str, msg_type: str, raw: dict
+    ) -> None:
+        """把媒体解析任务交给异步 worker(失败仅留空,不抛)。"""
+        try:
+            from app.services.media_worker import get_media_worker
+
+            get_media_worker().submit(chat_id, message_id, msg_type, raw)
+        except Exception:  # noqa: BLE001 - 入队失败不影响消息落库,URL 留空
+            logger.exception("媒体任务入队失败(URL 留空) msg=%s", message_id)
 
     def save_message(self, create: MessageCreate) -> bool:
         """保存一条解析后的消息(含对话关系写入)。返回是否新写入。"""
@@ -411,6 +415,36 @@ def _extract_post_text(content: Any) -> str:
 
 
 # ---------------------------------------------------------------- 资源落盘
+def _has_media(msg_type: str, raw: Any) -> bool:
+    """消息是否含需要异步解析的媒体资源(有对应 key 才算)。"""
+    if not isinstance(raw, dict):
+        return False
+    if msg_type == "image":
+        return bool(raw.get("image_key"))
+    if msg_type == "media":
+        return bool(raw.get("file_key") or raw.get("image_key"))
+    if msg_type == "file":
+        return bool(raw.get("file_key"))
+    if msg_type == "post":
+        return bool(_extract_post_image_keys(raw.get("content")))
+    return False
+
+
+def resolve_media(raw: dict, msg_type: str, message_id: str) -> None:
+    """按消息类型解析媒体资源 URL(供媒体 worker / 回填脚本共用),原地改 raw。
+
+    复用既有 _resolve_* 实现;失败各自优雅降级(保留 file_key,URL 留空)。
+    """
+    if msg_type == "image":
+        _resolve_image(raw, message_id)
+    elif msg_type == "media":
+        _resolve_video(raw, message_id)
+    elif msg_type == "file":
+        _resolve_file(raw, message_id)
+    elif msg_type == "post":
+        _resolve_post_images(raw, message_id)
+
+
 def _resolve_image(raw: dict, message_id: str) -> None:
     """图片消息:下载 image_key(type=image) 上传七牛,写入 raw.image_url。"""
     raw.setdefault("image_url", "")

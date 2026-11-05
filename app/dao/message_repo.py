@@ -72,6 +72,26 @@ class MessageRepo:
         )
         return self._session.execute(stmt).scalar_one_or_none()
 
+    def update_raw(
+        self, chat_id: str, message_id: str, raw: dict
+    ) -> int:
+        """按 (chat_id, message_id) 更新该消息的 raw(媒体 worker 回填 URL 用)。
+
+        媒体异步 worker 解析出资源 URL 后,用它把已落库消息行的 raw 原地改写
+        为带 URL 的版本。返回影响行数(0 = 消息不存在,幂等安全)。
+        注意:需写入「新 dict 对象」,JSON 列才可被 SQLAlchemy 检测到变更。
+        """
+        from sqlalchemy import update
+
+        stmt = (
+            update(Message)
+            .where(Message.chat_id == chat_id, Message.message_id == message_id)
+            .values(raw=raw)
+        )
+        result = self._session.execute(stmt)
+        self._session.commit()
+        return result.rowcount or 0
+
     def list_roots(
         self, chat_id: str | None = None, limit: int = 50
     ) -> list[tuple[str, str]]:

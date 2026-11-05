@@ -45,6 +45,10 @@ async def lifespan(app: FastAPI):
     from app.services.feishu_handler import get_event_queue
 
     get_event_queue().start()
+    # 媒体异步解析 worker(与事件队列同步启停;媒体下载上传在独立线程池并发,不堵队列)
+    from app.services.media_worker import get_media_worker
+
+    get_media_worker().start()
     # 主题 AI 总结后台调度(建表后再启,租约锁表依赖 create_all)
     from app.services.topic_summary_service import get_topic_summary_service
     from app.services.conv_stitch_service import get_conv_stitch_service
@@ -62,10 +66,14 @@ async def lifespan(app: FastAPI):
             if count_users(s) == 0:
                 logger.warning("尚未创建任何账号,请访问 /login 注册首个账号(自动成为管理员)")
     yield
-    # 应用关闭(优雅):停后台调度 + 排空事件队列,处理完在途事件再退出
+    # 应用关闭(优雅):停后台调度 + 排空事件队列,处理完在途事件再退出。
+    # 顺序:先停事件队列(它 drain 时可能再入队媒体任务),再让媒体 worker 排空。
     get_conv_stitch_service().stop()
     get_topic_summary_service().stop()
     get_event_queue().stop(drain=True)
+    from app.services.media_worker import get_media_worker
+
+    get_media_worker().shutdown(wait=True)
     logger.info("服务已关闭")
 
 

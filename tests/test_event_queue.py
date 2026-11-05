@@ -195,26 +195,50 @@ def test_h6_no_retry_starvation():
     q.stop()
 
 
-def test_queue_drives_message_pipeline():
-    """集成(内存模式):队列消费的事件走正常入库管道,落库成功。"""
-    Session, _ = _make_session_factory()
+def test_queue_drives_message_pipeline(tmp_path):
+    """集成(内存模式):队列消费的事件走正常入库管道,落库成功。
 
+    用「每连接独立」的文件式 SQLite(而非共享单连接 StaticPool):消费线程
+    写、测试线程读各用独立连接,避免静态单连接上跨线程读写竞态(曾触发
+    StaleDataError/NoResultFound 偶发失败)。
+    """
+    import os
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import NullPool
+
+    from app.models import Base, Message
     from app.services.message_service import MessageService
+
+    db_path = tmp_path / "pipeline.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=NullPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
 
     def fn(data):
         with Session() as s:
             MessageService(s, allowed_chat_ids=set()).handle_receive_event(data)
 
     q = EventQueue(process_fn=fn, retry_delays=(0.01,))
-    q.start()
-    q.submit(_make_event())
-    assert _wait(lambda: _count_messages(Session) == 1)
-    with Session() as s:
-        from app.models import Message
-
-        row = s.query(Message).one()
-        assert row.text == "hello queue"
-    q.stop()
+    try:
+        q.start()
+        q.submit(_make_event())
+        assert _wait(lambda: _count_messages(Session) == 1)
+        with Session() as s:
+            row = s.query(Message).one()
+            assert row.text == "hello queue"
+    finally:
+        q.stop()
+        engine.dispose()
+        try:
+            os.remove(db_path)
+        except OSError:
+            pass
 
 
 def _count_messages(Session) -> int:

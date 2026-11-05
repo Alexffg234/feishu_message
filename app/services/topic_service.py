@@ -25,6 +25,9 @@ from app.core.db import SessionLocal
 from app.dao.conversation_repo import ConversationRepo
 from app.dao.message_repo import MessageRepo
 from app.services.group_merge import merge_topic_group
+from app.services.label_norm import clean_label as _clean_label  # noqa: F401 (外部/测试引用)
+from app.services.label_norm import _STOP_LABELS  # noqa: F401 (兼容引用)
+from app.services.label_norm import normalize_label
 from app.services.llm import LLMClient, LLMError
 
 logger = logging.getLogger(__name__)
@@ -63,12 +66,7 @@ def _fmt_time(create_time: str) -> str:
         return create_time or "-"
 
 
-# 纯语气词/确认词:不构成主题,当作空标签重试
-_STOP_LABELS = {
-    "好的", "好", "收到", "嗯", "嗯嗯", "哦", "哦哦", "是", "是的", "对",
-    "对对", "可以", "行", "ok", "ok的", "明白", "了解", "知道了",
-    "谢谢", "好的谢谢", "好滴", "嗯好", "好嘞",
-}
+# 纯语气词/确认词:不构成主题,当作空标签重试(定义见 label_norm._STOP_LABELS)
 
 
 def get_standard_labels(session) -> list[str]:
@@ -90,17 +88,6 @@ def get_standard_labels(session) -> list[str]:
                 seen.add(t)
                 labels.append(t)
     return labels
-
-
-def _clean_label(raw: str) -> str:
-    """清洗 LLM 输出:去引号/空白/首尾标点,截断到 20 字;语气词垃圾标签置空。"""
-    label = (raw or "").strip().strip("\"'“”‘’「」 ")
-    label = label.strip("。.!,!;；:：")
-    if len(label) > 20:
-        label = label[:20]
-    if label.lower() in _STOP_LABELS:
-        return ""
-    return label
 
 
 class TopicService:
@@ -189,6 +176,17 @@ class TopicService:
                 label = self._llm_label(rows, samples, context, standards)
                 if not label:
                     raise LLMError("LLM 返回空标签")
+                # 标签归一化:别名收敛 -> 标准标签原样 -> (可选)相似度兜底。
+                # 收敛后同义标签写入同一 canonical,归组(canonical 相等)才能归到一起。
+                label = normalize_label(
+                    session,
+                    label,
+                    standards=standards,
+                    known_labels=[t for t, _s in samples],
+                    sim_threshold=get_settings().topic_alias_sim_threshold,
+                )
+                if not label:
+                    raise LLMError("LLM 标签归一化后为空")
                 repo.set_topic_for_group(chat_id, root_message_id, label)
                 # conversations.topic 此前无人写入(页面读到恒为空),随分类同步
                 ConversationRepo(session).set_topic(chat_id, root_message_id, label)

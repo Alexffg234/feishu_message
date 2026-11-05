@@ -457,11 +457,72 @@ def api_topic_groups_delete(name: str, db: Session = Depends(get_session)) -> di
     return {"deleted": name}
 
 
+# ---------------------------------------------------------------- 标签别名(阶段一)
+@router.get("/api/topic_aliases")
+def api_topic_aliases_list(db: Session = Depends(get_session)) -> dict:
+    """标签别名列表(alias -> canonical 收敛表),供管理页维护。"""
+    from app.models.topic_alias import TopicAlias
+
+    rows = db.query(TopicAlias).order_by(TopicAlias.canonical, TopicAlias.alias).all()
+    return {
+        "aliases": [
+            {"alias": r.alias, "canonical": r.canonical, "auto": r.auto}
+            for r in rows
+        ]
+    }
+
+
+@router.post("/api/topic_aliases")
+def api_topic_aliases_upsert(
+    body: TopicAliasIn, db: Session = Depends(get_session)
+) -> dict:
+    """新建/更新一条别名收敛(同名 upsert)。alias/canonical 均做标签清洗。"""
+    from app.models.topic_alias import TopicAlias
+    from app.services.label_norm import clean_label
+
+    alias = clean_label(body.alias)
+    canonical = clean_label(body.canonical)
+    if not alias or not canonical:
+        raise HTTPException(status_code=400, detail="alias 与 canonical 均不能为空(语气词无效)")
+    if alias == canonical:
+        raise HTTPException(status_code=400, detail="alias 与 canonical 不能相同")
+    row = db.query(TopicAlias).filter(TopicAlias.alias == alias).first()
+    if row is None:
+        row = TopicAlias(alias=alias, canonical=canonical, auto=0)
+        db.add(row)
+    else:
+        row.canonical = canonical
+        row.auto = 0
+    db.commit()
+    db.refresh(row)
+    return {"alias": row.alias, "canonical": row.canonical, "auto": row.auto}
+
+
+@router.delete("/api/topic_aliases/{alias}")
+def api_topic_aliases_delete(alias: str, db: Session = Depends(get_session)) -> dict:
+    """删除一条别名收敛。"""
+    from app.models.topic_alias import TopicAlias
+
+    row = db.query(TopicAlias).filter(TopicAlias.alias == alias).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="别名不存在")
+    db.delete(row)
+    db.commit()
+    return {"deleted": alias}
+
+
 class TopicKnowledgeIn(BaseModel):
     """主题参考知识库入参:同名 upsert,整体覆盖 content。"""
 
     topic: str
     content: str
+
+
+class TopicAliasIn(BaseModel):
+    """标签别名入参:把 alias 收敛到 canonical。"""
+
+    alias: str
+    canonical: str
 
 
 @router.get("/api/topic_knowledge")

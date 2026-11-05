@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     # False = 只打标签不归并。
     topic_merge_enabled: bool = True
 
+    # ---------- 标签归一化(话题归纳阶段一) ----------
+    # LLM 打标输出后先做「别名表收敛 + 标准标签原样 + 相似度兜底」再入库/归组。
+    # topic_alias_sim_threshold: >0 时对未命中别名/标准的标签做 2-gram Dice 相似度兜底
+    #   (与既有标签 ≥ 该阈值才收敛);=0 禁用兜底(仅精确别名/标准收敛,最安全)。
+    topic_alias_sim_threshold: float = 0.0
+
     # ---------- 会话缝合(后台周期 LLM 判定同一案例续聊) ----------
     # 标准标签只归类不合并,同一案例的后续会话由本调度自动缝合合并
     # (LLM 判定「同一问题处理生命周期」,护栏:标签不冲突)。

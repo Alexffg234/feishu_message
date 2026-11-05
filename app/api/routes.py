@@ -511,6 +511,88 @@ def api_topic_aliases_delete(alias: str, db: Session = Depends(get_session)) -> 
     return {"deleted": alias}
 
 
+# ---------------------------------------------------------------- 指标埋点(阶段四 P2)
+@router.get("/api/topic_metrics")
+def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
+    """话题归纳量化指标(只读,不改库),供度量「标签治理 / 归并 / 缝合」效果。
+
+    - topic_count / low_frequency_topic_count : 标签总数,以及仅出现 1 个组的
+      低频标签数与占比(同义词漂移的直接度量,目标:占比下降)
+    - normalization: 归一化收敛率 = (别名命中 + 相似度兜底) / 归一化总数,
+      衡量别名表覆盖率(进程内累计近似,见 label_norm.get_norm_stats)
+    - merge_rate: 收敛率 = 已收敛到单组的 (chat,topic) 占比;
+      topics_with_multiple_groups 为仍待归并的碎片主题数
+    - stitching: 缝合确认率 = 确定性 case_key 命中 / (case_key + LLM) 判定总数,
+      衡量确定性锚点接管比例(进程内累计近似,见 conv_stitch.get_stitch_counts)
+    - false_merge_sample: 误合率需人工复核,此处返回抽样状态占位(不自动判定)
+    """
+    from sqlalchemy import func
+
+    from app.services.conv_stitch import get_stitch_counts
+    from app.services.label_norm import get_norm_stats
+
+    # ---- 标签分布:每 (chat_id, topic) 的分组数(组=distinct root_message_id) ----
+    #     每个 (chat, topic) 的理想终态是 1 组(碎片已并回原问题块/缝合已关联)。
+    ct_groups = {
+        (c, t): n
+        for c, t, n in db.query(
+            Message.chat_id,
+            Message.topic,
+            func.count(func.distinct(Message.root_message_id)),
+        )
+        .where(Message.topic != "", Message.root_message_id != "")
+        .group_by(Message.chat_id, Message.topic)
+        .all()
+    }
+    topic_count = db.query(func.count(func.distinct(Message.topic))).where(
+        Message.topic != ""
+    ).scalar() or 0
+
+    # 低频标签:该 topic 在任意群均仅 1 组
+    topic_group_total = {t: 0 for t in {t for (_c, t) in ct_groups}}
+    for (_c, t), n in ct_groups.items():
+        topic_group_total[t] += n
+    low_freq = sum(1 for n in topic_group_total.values() if n <= 1)
+
+    # ---- 归一化收敛率(进程内累计) ----
+    ns = get_norm_stats()
+    converged = ns["alias_hit"] + ns["similarity_hit"]
+    normalization_rate = round(converged / ns["total"], 4) if ns["total"] else 0.0
+
+    # ---- 归并率:已收敛到单组的 (chat, topic) 占比 ----
+    merged_topics = sum(1 for n in ct_groups.values() if n == 1)
+    ct_total = len(ct_groups)
+    merge_rate = round(merged_topics / ct_total, 4) if ct_total else 0.0
+
+    # ---- 缝合确认率(进程内累计) ----
+    ck, llm_n = get_stitch_counts()
+    stitch_total = ck + llm_n
+    stitch_confirm_rate = round(ck / stitch_total, 4) if stitch_total else 0.0
+
+    return {
+        "topic_count": int(topic_count),
+        "low_frequency_topic_count": int(low_freq),
+        "low_frequency_ratio": round(low_freq / topic_count, 4) if topic_count else 0.0,
+        "normalization": {
+            "converged": int(converged),
+            "total": int(ns["total"]),
+            "alias_hit": int(ns["alias_hit"]),
+            "similarity_hit": int(ns["similarity_hit"]),
+            "standard_hit": int(ns["standard_hit"]),
+            "rate": normalization_rate,
+        },
+        "merge_rate": merge_rate,
+        "remaining_fragmented_topics": sum(1 for n in ct_groups.values() if n > 1),
+        "stitch_confirm_rate": stitch_confirm_rate,
+        "stitching": {"case_key": ck, "llm": llm_n},
+        "false_merge_sample": {
+            "status": "needs_manual_review",
+            "sample_size": 0,
+            "rate": None,
+        },
+    }
+
+
 # ---------------------------------------------------------------- 案例软合并(阶段三)
 @router.get("/api/cases/stats")
 def api_cases_stats(db: Session = Depends(get_session)) -> dict:

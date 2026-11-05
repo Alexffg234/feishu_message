@@ -169,7 +169,12 @@ class TopicService:
                 label = existing_topic
                 to_merge = existing_topic if merge else ""
             else:
-                samples = self._existing_topic_samples(repo, chat_id)
+                current_text = " ".join(
+                    (m.text or "").strip() for m in rows if (m.text or "").strip()
+                )
+                samples = self._existing_topic_samples(
+                    repo, chat_id, current_text=current_text
+                )
                 standards = get_standard_labels(session)
                 first_id = min(m.id for m in rows)
                 context = repo.list_recent_before(chat_id, first_id, limit=6)
@@ -217,19 +222,55 @@ class TopicService:
 
     @staticmethod
     def _existing_topic_samples(
-        repo: MessageRepo, chat_id: str, limit: int = 50
+        repo: MessageRepo,
+        chat_id: str,
+        current_text: str = "",
+        limit: int = 20,
     ) -> list[tuple[str, str]]:
-        """已有主题摘要:优先同群,不足再用全局,去重后截断。"""
-        samples = repo.get_topic_samples(chat_id=chat_id, limit=limit)
-        if len(samples) < limit:
+        """已有主题摘要(成本治理,阶段四 P1-B):优先同群,不足再用全局,去重。
+
+        抽样顺序 = 与当前文本共现词优先 + 最近活跃兜底,上限收敛到 limit(默认 20),
+        避免主题堆积时样本无限膨胀撑大 prompt、以及 LLM 因样本过多而「偷懒错沿用」。
+        仍沿用「先同群后全局补位」语义;current_text 为当前待分类组的文本拼接。
+        """
+        # 候选池:多取一些(仍以最近活跃序)留出共现重排空间,避免直接截断丢失活跃主题
+        pool_limit = min(max(limit * 3, limit + 12), 60)
+        samples = repo.get_topic_samples(chat_id=chat_id, limit=pool_limit)
+        if len(samples) < pool_limit:
             seen = {t for t, _s in samples}
-            for topic, text in repo.get_topic_samples(limit=limit):
+            for topic, text in repo.get_topic_samples(limit=pool_limit):
                 if topic not in seen:
                     samples.append((topic, text))
                     seen.add(topic)
-                if len(samples) >= limit:
+                if len(samples) >= pool_limit:
                     break
-        return samples
+        if not samples:
+            return []
+        if not current_text:
+            return samples[:limit]
+        return TopicService._rank_by_cooccurrence(samples, current_text, limit)
+
+    @staticmethod
+    def _rank_by_cooccurrence(
+        samples: list[tuple[str, str]], current_text: str, limit: int
+    ) -> list[tuple[str, str]]:
+        """稳定排序:与当前文本共现字越多越靠前,其余保持最近活跃顺序。
+
+        共现词(主题/摘要与当前文本共享的字符)往往提示「同类问题」,
+        把它们提前送入 LLM,既提高沿用正确标签的概率,又不撑大样本量。
+        """
+        cur = set(current_text.replace(" ", ""))
+        if not cur:
+            return samples[:limit]
+
+        def _key(item: tuple[str, str]) -> int:
+            topic, text = item
+            # 注意:set(x or "") & cur 的括号在 set 外,先构集合再做交集
+            return -(
+                len(set(topic or "") & cur) + len(set(text or "") & cur)
+            )
+
+        return sorted(samples, key=_key)[:limit]
 
     def wait_idle(self, timeout: float = 30.0) -> None:
         """等待后台分类任务全部完成(测试用)。"""
@@ -299,6 +340,46 @@ class TopicService:
             return result
 
     # ---------------------------------------------------------------- 内部
+    @staticmethod
+    def _repr_rows(rows: list, limit: int = _MAX_ROWS_PROMPT) -> list:
+        """代表消息抽样替代硬截断(阶段四 P1-B)。
+
+        超过 limit 时不再简单截断前 N 条,而是优先保留高信息量消息:
+        首条 + 末条 + 最长 3 条 + 有图片/文件/视频的消息(携带视觉/附件上下文),
+        不足 limit 再按时间补中间消息覆盖全链。返回按消息 id 升序。
+        """
+        if len(rows) <= limit:
+            return rows
+        selected: list = []
+        seen: set[int] = set()
+
+        def add(m) -> None:
+            if m.id not in seen:
+                seen.add(m.id)
+                selected.append(m)
+
+        add(rows[0])
+        add(rows[-1])
+        # 最长优先(按文本长度降序)
+        for m in sorted(rows, key=lambda x: len((x.text or "").strip()), reverse=True):
+            if len(selected) >= limit:
+                break
+            add(m)
+        # 图片/文件/视频消息元数据
+        for m in rows:
+            if len(selected) >= limit:
+                break
+            if m.message_type in ("image", "media", "file"):
+                add(m)
+        # 仍不足:按时间补中间消息
+        if len(selected) < limit:
+            for m in rows:
+                if len(selected) >= limit:
+                    break
+                add(m)
+        selected.sort(key=lambda x: x.id)
+        return selected
+
     def _llm_label(
         self,
         rows: list,
@@ -307,7 +388,7 @@ class TopicService:
         standards: list[str] | None = None,
     ) -> str:
         lines = []
-        for m in rows[:_MAX_ROWS_PROMPT]:
+        for m in self._repr_rows(rows):
             text = (m.text or "").strip() or f"({m.message_type or '非文本'})"
             lines.append(f"[{_fmt_time(m.create_time)}] {m.sender_id or '?'}: {text}")
         if samples:

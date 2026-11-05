@@ -32,6 +32,18 @@ _STOP_LABELS = {
 # 别名链解析深度上限 + 环保护
 _ALIAS_MAX_HOPS = 5
 
+# 归一化收敛计数(进程内,仅供 /api/topic_metrics 展示近似值;多 worker 各自累计):
+#   total         = 经过归一化(清洗后非空)的标签总数
+#   alias_hit     = 命中别名表被收敛(rewrite)的次数
+#   similarity_hit= 命中相似度兜底被收敛的次数
+#   standard_hit  = 标准标签原样沿用(本就是 canonical,不算收敛)的次数
+_norm_stats = {"total": 0, "alias_hit": 0, "similarity_hit": 0, "standard_hit": 0}
+
+
+def get_norm_stats() -> dict:
+    """返回归一化收敛计数快照(只读,供指标端点)。"""
+    return dict(_norm_stats)
+
 
 def clean_label(raw: str) -> str:
     """清洗 LLM 输出:去引号/空白/首尾标点,截断到 20 字;语气词垃圾标签置空。"""
@@ -110,16 +122,19 @@ def normalize_label(
     cleaned = clean_label(raw)
     if not cleaned:
         return ""
+    _norm_stats["total"] += 1
 
     standards_set = set(standards) if standards else set()
 
     # 1) 别名精确命中(主机制)
     resolved = _resolve_alias(session, cleaned)
     if resolved:
+        _norm_stats["alias_hit"] += 1
         return resolved
 
     # 2) 标准标签原样:避免把标准名再收敛到别的相似标签
     if cleaned in standards_set:
+        _norm_stats["standard_hit"] += 1
         return cleaned
 
     # 3) 相似度兜底(可选,默认关闭)
@@ -132,6 +147,7 @@ def normalize_label(
             if score > best_score:
                 best, best_score = cand, score
         if best and best_score >= sim_threshold:
+            _norm_stats["similarity_hit"] += 1
             logger.info("标签相似度兜底 %r -> %r (dice=%.2f)", cleaned, best, best_score)
             return best
 

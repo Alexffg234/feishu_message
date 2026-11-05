@@ -120,3 +120,60 @@ def test_concurrent_conversation_create_reuse(monkeypatch, tmp_path):
         check.close()
     s2.close()
 
+
+def test_savepoint_rollback_reuse_commits_full_tx(monkeypatch, tmp_path):
+    """SAVEPOINT 冲突回退复用后,外层「消息事务」仍完整提交。
+
+    补盲:相比 test_concurrent_conversation_create_reuse(只断言对话复用 +
+    消息 conversation_id),本用例额外验证冲突回退后同一事务内的回复边、
+    对话聚合统计也一并落库——即外层事务在 SAVEPOINT 回滚后依旧可用并整体提交,
+    不会残留未 flush 的重复 Conversation。
+    """
+    db = tmp_path / "atomic_full.db"
+    engine = create_engine(f"sqlite:///{db}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    # 「先到者」已经提交了 (oc_full, r1) 对话
+    s1 = Session()
+    conv_a = ConversationRepo(s1).create("oc_full", "r1", "u1")
+    s1.commit()
+    conv_a_id = conv_a.id
+    s1.close()
+
+    # 「后到者」:首次 get miss(竞态窗口)→ create 真实命中唯一键 → 回退复用
+    s2 = Session()
+    svc2 = MessageService(s2, allowed_chat_ids=set())
+    orig_get = ConversationRepo.get
+    n = {"calls": 0}
+
+    def fake_get(self, chat_id, root_message_id):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            return None  # 竞态:没看到已提交的对话
+        return orig_get(self, chat_id, root_message_id)
+
+    monkeypatch.setattr(ConversationRepo, "get", fake_get)
+
+    # 回复消息:parent=r1 未作为消息落库(悬空父)→ 深度回退 depth=1
+    assert svc2.save_message(_msg("b1", "u2", chat="oc_full", parent="r1", root="r1")) is True
+
+    check = Session()
+    try:
+        # 复用既有对话,不新增、不残留 pending 重复插入
+        assert n["calls"] >= 2  # 确认确实走了「get→create失败→再 get」的复用路径
+        assert check.query(Conversation).filter_by(
+            chat_id="oc_full", root_message_id="r1"
+        ).count() == 1
+        m = check.query(Message).filter(Message.message_id == "b1").one()
+        assert m.conversation_id == conv_a_id
+        # 外层事务完整提交:回复边 + 聚合统计一并落库
+        link = check.query(MessageLink).filter_by(child_message_id="b1").one()
+        assert link.parent_message_id == "r1"
+        assert link.depth == 1
+        conv = check.query(Conversation).filter_by(id=conv_a_id).one()
+        assert conv.message_count == 1
+    finally:
+        check.close()
+    s2.close()
+

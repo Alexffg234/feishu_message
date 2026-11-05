@@ -34,16 +34,17 @@ async def lifespan(app: FastAPI):
     setup_logging()
     settings = get_settings()
     app.state.dispatcher = _dispatcher()
-    # 事件队列消费者(先应答后处理,见 event_queue)
-    from app.services.feishu_handler import get_event_queue
-
-    get_event_queue().start()
-    # 数据表就绪
+    # 数据表就绪:必须先于事件队列消费者/后台调度启动,否则消费者线程会在
+    # 表就绪前查询(如 event_outbox)而报 "no such table"(新建库/慢建表时必现)。
     try:
         init_db()
     except Exception:  # noqa: BLE001
         # 数据库不可用时不清零服务,交由 /ready 与日志暴露
         logger.exception("init_db 失败(数据库可能未就绪)")
+    # 事件队列消费者(先应答后处理,见 event_queue)
+    from app.services.feishu_handler import get_event_queue
+
+    get_event_queue().start()
     # 主题 AI 总结后台调度(建表后再启,租约锁表依赖 create_all)
     from app.services.topic_summary_service import get_topic_summary_service
     from app.services.conv_stitch_service import get_conv_stitch_service

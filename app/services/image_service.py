@@ -3,8 +3,10 @@
 背景:飞书图片/视频消息的内容里只有资源 key(image_key / file_key),这些 key 是
 临时凭证,会过期,本身不是可直接展示的 URL。
 
-这里在收到资源类消息时(入库前)用飞书「获取消息中的资源文件」接口把
-file_key 下载成二进制,再上传到七牛对象存储,生成长期稳定的可访问 URL。
+这里在收到资源类消息时(异步,见 media_worker)用飞书「获取消息中的资源文件」
+接口把 file_key 分块流式下载到临时文件,再从文件路径流式上传到七牛对象存储,
+生成长期稳定的可访问 URL(H5 Part2:下载/上传全程流式,大视频/大文件不再整包
+驻留内存,临时文件在 finally 中清理)。
 
 接口说明(飞书 im/v1/messages/:message_id/resources/:file_key,type 必填):
 - type=image   图片、富文本里的图片 → file_key 用 image_key
@@ -87,43 +89,52 @@ class ImageService:
             logger.warning("飞书客户端不可用,跳过 %s 下载 %s", res_type, file_key)
             return ""
 
-        # 下载飞书资源二进制(需 message_id + file_key + type)
-        data = self._download_resource(client, file_key, message_id, res_type)
-        if not data:
+        # 分块流式下载到临时文件(需 message_id + file_key + type),随后从该文件路径
+        # 上传——大视频/大文件不再整包驻留内存。返回的临时文件由 finally 统一清理。
+        tmp_path = self._download_resource(client, file_key, message_id, res_type)
+        if not tmp_path:
             logger.warning("下载飞书资源失败 %s=%s message_id=%s", res_type, file_key, message_id)
             return ""
+        try:
+            # 上传到七牛,key 用 file_key(天然唯一,且能对回去原资源)
+            key = f"{_PROVIDER}/{save_dir}/{file_key}"
+            # 按文件名扩展名推断 MIME 类型,让七牛的 Content-Type 正确(否则默认
+            # application/octet-stream,浏览器无法识别文件类型,表现为"打不开/损坏")。
+            mime_type = _guess_mime(file_name)
+            # 文件/视频类一律走分片断点续传上传:单次表单 POST 对超大文件
+            # (实测 ~25MB 起)会卡在 60s socket 超时(status=-1);分片上传每片
+            # 独立计超时,实测稳定。图片小则走 put_file(从文件路径流式读,同样不整包进内存)。
+            ok, err = self._upload_to_qiniu(
+                key, tmp_path, mime_type=mime_type, use_file_api=(save_dir == "files")
+            )
+            if not ok:
+                logger.warning("上传资源到七牛失败 %s=%s: %s", res_type, file_key, err)
+                return ""
 
-        # 上传到七牛,key 用 file_key(天然唯一,且能对回去原资源)
-        key = f"{_PROVIDER}/{save_dir}/{file_key}"
-        # 按文件名扩展名推断 MIME 类型,让七牛的 Content-Type 正确(否则默认
-        # application/octet-stream,浏览器无法识别文件类型,表现为"打不开/损坏")。
-        mime_type = _guess_mime(file_name)
-        # 文件/视频类一律走分片断点续传上传:put_data 是单个 POST,大文件
-        # (实测 ~25MB 起)会卡在 60s socket 超时(status=-1);分片上传每片
-        # 独立计超时,实测稳定。图片小且 put_data 表现良好,保持原路径。
-        ok, err = self._upload_to_qiniu(
-            key, data, mime_type=mime_type, use_file_api=(save_dir == "files")
-        )
-        if not ok:
-            logger.warning("上传资源到七牛失败 %s=%s: %s", res_type, file_key, err)
-            return ""
-
-        url = f"{settings.qiniu_domain.rstrip('/')}/{key}"
-        # 文件类型:追加 ?attname= 让七牛返回正确 Content-Disposition,下载文件名带扩展名。
-        if file_name:
-            url = f"{url}?attname={quote(file_name)}"
-        logger.info("资源已落盘(%s): %s -> %s", res_type, file_key, url)
-        return url
+            url = f"{settings.qiniu_domain.rstrip('/')}/{key}"
+            # 文件类型:追加 ?attname= 让七牛返回正确 Content-Disposition,下载文件名带扩展名。
+            if file_name:
+                url = f"{url}?attname={quote(file_name)}"
+            logger.info("资源已落盘(%s): %s -> %s", res_type, file_key, url)
+            return url
+        finally:
+            _safe_remove(tmp_path)
 
     # ------------------------------------------------------------ 飞书下载
+    # 流式下载分块大小:逐块读盘落盘,大视频/大文件不再整包驻留内存
+    _STREAM_CHUNK = 1 * 1024 * 1024
+
     def _download_resource(
         self,
         client: lark.Client,
         file_key: str,
         message_id: str,
         res_type: ResType,
-    ) -> bytes | None:
-        """调飞书[获取消息中的资源文件]下载资源二进制。失败返回 None。
+    ) -> str | None:
+        """调飞书[获取消息中的资源文件],分块流式写入临时文件。
+
+        返回临时文件路径(后续从文件路径上传);失败/异常返回 None。
+        调用方负责在 finally 中清理返回的临时文件。
 
         接口: GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={res_type}
         必须带 message_id,缺 message_id 或走 images 快捷接口都会报 234001。
@@ -151,17 +162,26 @@ class ImageService:
             if file_io is None:
                 logger.warning("飞书资源响应无内容 %s=%s", res_type, file_key)
                 return None
+            fd, tmp_path = tempfile.mkstemp(prefix="feishu_", suffix=".part")
             try:
-                return file_io.read()
+                # 分块读取底层文件流,逐块落盘:整包内容不占用内存
+                with os.fdopen(fd, "wb") as out:
+                    while True:
+                        chunk = file_io.read(self._STREAM_CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                return tmp_path
             except Exception as e:  # noqa: BLE001
-                logger.warning("读取飞书资源字节失败 %s=%s: %s", res_type, file_key, e)
+                logger.warning("写资源临时文件失败 %s=%s: %s", res_type, file_key, e)
+                _safe_remove(tmp_path)
                 return None
         except Exception as e:  # noqa: BLE001 - 网络/权限等统一降级
             logger.warning("下载飞书资源异常 %s=%s: %s", res_type, file_key, e)
             return None
 
     # ------------------------------------------------------------ 七牛上传
-    # 七牛 put_data(表单上传)上限 100MB,超过须改用分片/断点续传上传。
+    # 七牛表单上传(put_file)超过该阈值改用分片/断点续传,避免单 POST 超时。
     _CHUNK_THRESHOLD = 100 * 1024 * 1024
     # 网络层失败(status=-1)等自动重试次数
     _UPLOAD_RETRIES = 3
@@ -169,15 +189,14 @@ class ImageService:
     def _upload_to_qiniu(
         self,
         key: str,
-        data: bytes,
+        src_path: str,
         mime_type: str = "application/octet-stream",
         use_file_api: bool = False,
     ) -> tuple[bool, str]:
-        """把字节上传到七牛。返回 (是否成功, 出错信息)。
+        """把临时文件上传到七牛。返回 (是否成功, 出错信息)。
 
-        - use_file_api=True(文件/视频)或大文件(>100MB):落临时文件走分片/
-          断点续传上传;
-        - 其余(图片等小资源):put_data 表单上传;
+        - use_file_api=True(文件/视频)或大文件(>100MB):走分片/断点续传上传;
+        - 其余(图片等小资源):put_file 从文件路径表单上传(流式读,不整包进内存);
         - 网络层失败自动重试,避免偶发抖动丢资源。
         """
         try:
@@ -189,7 +208,7 @@ class ImageService:
 
             last_err = "unknown"
             for attempt in range(1, self._UPLOAD_RETRIES + 1):
-                ok, last_err = self._do_upload(token, key, data, mime_type, use_file_api)
+                ok, last_err = self._do_upload(token, key, src_path, mime_type, use_file_api)
                 if ok:
                     return True, ""
                 logger.warning(
@@ -202,47 +221,39 @@ class ImageService:
             return False, str(e)
 
     def _do_upload(
-        self, token: str, key: str, data: bytes, mime_type: str, use_file_api: bool = False
+        self, token: str, key: str, src_path: str, mime_type: str, use_file_api: bool = False
     ) -> tuple[bool, str]:
-        """单次上传。返回 (是否成功, 出错信息)。"""
-        if use_file_api or len(data) > self._CHUNK_THRESHOLD:
-            ret, info = self._put_large(token, key, data, mime_type)
+        """单次上传(从文件路径)。返回 (是否成功, 出错信息)。"""
+        if use_file_api or os.path.getsize(src_path) > self._CHUNK_THRESHOLD:
+            ret, info = self._put_large(token, key, src_path, mime_type)
         else:
-            from qiniu import put_data
+            from qiniu import put_file
 
-            ret, info = put_data(token, key, data=data, mime_type=mime_type)
+            ret, info = put_file(token, key, src_path, mime_type=mime_type)
         if info is not None and info.status_code == 200:
             return True, ""
         return False, _qiniu_info_message(info)
 
     def _put_large(
-        self, token: str, key: str, data: bytes, mime_type: str
+        self, token: str, key: str, src_path: str, mime_type: str
     ) -> tuple:
-        """大文件断点续传上传:写临时文件后调 SDK 分片上传。返回 (ret, info)。
+        """大文件断点续传上传:直接读 `src_path` 分片上传。返回 (ret, info)。
 
         兼容新旧 qiniu SDK:7.x 提供 put_file/put_file_v2,旧版提供 put_chunked。
+        临时文件由调用方(_resolve_resource 的 finally)负责清理,这里不再删除。
         """
         import qiniu as _qiniu
 
-        fd, tmp_path = tempfile.mkstemp(prefix="qiniu_", suffix=".part")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            for name in ("put_file_v2", "put_file", "put_chunked"):
-                fn = getattr(_qiniu, name, None)
-                if fn is None:
-                    continue
-                try:
-                    return fn(token, key, tmp_path, mime_type=mime_type)
-                except TypeError:
-                    # 个别版本无 mime_type 参数
-                    return fn(token, key, tmp_path)
-            raise RuntimeError("qiniu SDK 无可用分片上传函数")
-        finally:
+        for name in ("put_file_v2", "put_file", "put_chunked"):
+            fn = getattr(_qiniu, name, None)
+            if fn is None:
+                continue
             try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+                return fn(token, key, src_path, mime_type=mime_type)
+            except TypeError:
+                # 个别版本无 mime_type 参数
+                return fn(token, key, src_path)
+        raise RuntimeError("qiniu SDK 无可用分片上传函数")
 
     # ------------------------------------------------------------ 客户端
     def _get_client(self) -> lark.Client | None:
@@ -267,6 +278,16 @@ def _qiniu_info_message(info) -> str:
         return f"status={code} {str(text_body)[:200]}"
     except Exception:  # noqa: BLE001
         return "unknown qiniu error"
+
+
+def _safe_remove(path: str) -> None:
+    """删临时文件,不存在/删除失败都静默(清理属尽力而为)。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:  # noqa: BLE001 - 清理失败不影响主流程
+        pass
 
 
 def _guess_mime(file_name: str) -> str:

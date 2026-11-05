@@ -23,8 +23,7 @@ import time
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import TextClause, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import BASE_DIR, get_settings
@@ -69,6 +68,31 @@ _WEAK_PASSWORDS = {
 # 登录失败限流
 _MAX_FAILS = 5
 _FAIL_WINDOW_SEC = 300
+
+
+def _upsert_fail_sql(dialect: str) -> TextClause:
+    """生成单条原子 upsert(首次插入 / 窗口内递增 / 窗口过期重计 三合一)。
+
+    - MySQL: ON DUPLICATE KEY UPDATE,窗口内 fail_count+1,过期则重置为 1
+    - PostgreSQL / SQLite(3.24+): ON CONFLICT (username) DO UPDATE,同语义
+    返回 sqlalchemy.text() 语句;参数统一 {key, new(新到期时刻), now(当前)}。
+    """
+    if dialect == "mysql":
+        return text(
+            "INSERT INTO login_fails (username, fail_count, window_expires_at_ms) "
+            "VALUES (:key, 1, :new) "
+            "ON DUPLICATE KEY UPDATE "
+            "fail_count = IF(window_expires_at_ms > :now, fail_count + 1, 1), "
+            "window_expires_at_ms = :new"
+        )
+    return text(
+        "INSERT INTO login_fails (username, fail_count, window_expires_at_ms) "
+        "VALUES (:key, 1, :new) "
+        "ON CONFLICT (username) DO UPDATE SET "
+        "fail_count = CASE WHEN login_fails.window_expires_at_ms > :now "
+        "                 THEN login_fails.fail_count + 1 ELSE 1 END, "
+        "window_expires_at_ms = :new"
+    )
 
 
 def _has_long_sequence(pwd: str) -> bool:
@@ -426,63 +450,21 @@ class LoginThrottle:
             return row.fail_count >= self._max and now_ms < row.window_expires_at_ms
 
     def _record_fail_db(self, key: str) -> None:
-        """记录一次登录失败(原子递增,跨 worker 可见)。
+        """记录一次登录失败(单条原子 upsert,跨 worker/线程可见)。
 
-        两段式:
-        1) 滑动窗口仍有效时,用单条原子 UPDATE 递增计数(避免读-改-写竞态、
-           不依赖进程内状态,多个 worker/线程共享同一份计数)。
-        2) 未命中(行不存在或窗口已过)时走插入/重计流程;并发首个 INSERT
-           用窄的 IntegrityError 捕获处理主键冲突,与「真 DB 不可用」区分开。
+        所有分支(首次插入 / 窗口内递增 / 窗口过期重计)收敛为一条
+        INSERT ... ON CONFLICT 语句,由数据库原子完成,彻底消除
+        读-改-写竞态与并发首个 INSERT 的主键冲突抖动;也避免了把
+        并发冲突误判为「DB 不可用」而降级到进程内兜底(否则多 worker
+        并发暴力破解同一用户名时共享计数会被严重低估、锁定晚触发)。
         """
         now_ms = int(self._now() * 1000)
         new_exp_ms = now_ms + self._window * 1000
-
         with self._session_factory() as session:
-            # 1) 原子递增:仅当行存在且窗口未过期时命中,rowcount=1
-            res = session.execute(
-                text(
-                    "UPDATE login_fails SET fail_count = fail_count + 1, "
-                    "window_expires_at_ms = :new "
-                    "WHERE username = :key AND window_expires_at_ms > :now"
-                ),
-                {"new": new_exp_ms, "key": key, "now": now_ms},
-            )
-            if res.rowcount:
-                session.commit()
-                return
-
-            # 2) 未命中:插入新行,或窗口已过则重计
-            try:
-                row = session.get(LoginFail, key)
-                if row is None:
-                    session.add(
-                        LoginFail(
-                            username=key,
-                            fail_count=1,
-                            window_expires_at_ms=new_exp_ms,
-                        )
-                    )
-                else:
-                    # 行已存在但原子 UPDATE 未命中:仅窗口过期时重计;
-                    # 余下情况(如并发插入刚落库)仍在窗口内,直接递增而不是清零。
-                    if now_ms < row.window_expires_at_ms:
-                        row.fail_count += 1
-                    else:
-                        row.fail_count = 1
-                    row.window_expires_at_ms = new_exp_ms
-                session.commit()
-            except IntegrityError:
-                # 并发首个 INSERT 撞主键:回滚后重读已存在的行,再原子递增
-                session.rollback()
-                session.execute(
-                    text(
-                        "UPDATE login_fails SET fail_count = fail_count + 1, "
-                        "window_expires_at_ms = :new "
-                        "WHERE username = :key AND window_expires_at_ms > :now"
-                    ),
-                    {"new": new_exp_ms, "key": key, "now": now_ms},
-                )
-                session.commit()
+            dialect = session.get_bind().dialect.name
+            session.execute(_upsert_fail_sql(dialect),
+                            {"key": key, "new": new_exp_ms, "now": now_ms})
+            session.commit()
 
     def _reset_db(self, key: str) -> None:
         with self._session_factory() as session:

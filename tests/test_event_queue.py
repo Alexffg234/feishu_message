@@ -160,6 +160,41 @@ def test_stop_drains_pending():
     assert sorted(got) == list(range(10))
 
 
+def test_h6_no_retry_starvation():
+    """H6:队列持续繁忙(几乎不空闲)时,退避重试仍能按期被调度,不被饿死。
+
+    修复前,退避重试只在「队列恰好为空」时刷新;若队列被持续灌满,
+    重试任务会无限期延迟。修复后每次消费都带超时刷新,本测试断言
+    在持续灌入 filler 的压力下 retry_target 最终仍被处理。
+    """
+    state = {"n": 0}
+    got: list = []
+
+    def fn(x):
+        if x == "retry_target":
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("first")
+            got.append(x)
+            return
+        # filler:消耗一点时间,模拟真实入库耗时,让队列更难空闲
+        time.sleep(0.002)
+        got.append(x)
+
+    q = EventQueue(process_fn=fn, retry_delays=(0.02,))
+    q.start()
+    q.submit("retry_target")
+    end = time.monotonic() + 0.6
+    i = 0
+    while time.monotonic() < end:
+        if not q.submit(("filler", i)):
+            break
+        i += 1
+        time.sleep(0.001)
+    assert _wait(lambda: "retry_target" in got), "退避重试被饿死"
+    q.stop()
+
+
 def test_queue_drives_message_pipeline():
     """集成(内存模式):队列消费的事件走正常入库管道,落库成功。"""
     Session, _ = _make_session_factory()

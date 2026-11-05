@@ -295,6 +295,8 @@ class EventQueue:
             if item is _SENTINEL:
                 break
             self._process(item, 0)
+            # H6:队列持续繁忙时,退避重试不再饿死————消费后带超时刷新
+            self._flush_due_retries(timeout=_FLUSH_WAIT)
         # 排空剩余(drain),避免优雅关停时丢在途事件
         while True:
             try:

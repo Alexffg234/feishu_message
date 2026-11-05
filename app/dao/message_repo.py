@@ -16,8 +16,17 @@ class MessageRepo:
     def __init__(self, session: Session):
         self._session = session
 
+    def add(self, msg: Message) -> Message:
+        """把消息加入会话(仅 add 不提交),交由调用方统一提交。
+
+        用于「消息 + 对话挂接」单事务场景:调用方在 _attach_conversation
+        之后统一 commit,保证整笔写入的原子性。返回 msg 便于链式调用。
+        """
+        self._session.add(msg)
+        return msg
+
     def insert(self, msg: Message) -> Message:
-        """新增一条消息,返回对象。"""
+        """新增一条消息,返回对象(内部立即 commit,供独立写入场景使用)。"""
         self._session.add(msg)
         self._session.commit()
         self._session.refresh(msg)

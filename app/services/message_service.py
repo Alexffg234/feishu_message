@@ -12,11 +12,13 @@ import json
 import logging
 from typing import Any, Callable
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.dao.message_repo import MessageRepo
 from app.dao.conversation_repo import ConversationRepo
 from app.models.message import Message
+from app.models.conversation import Conversation
 from app.schemas.message import MessageCreate
 from app.services.case_key import extract_case_key
 from app.services.image_service import get_image_service
@@ -234,8 +236,11 @@ class MessageService:
             case_key=extract_case_key(create.text or ""),
         )
         try:
-            self._repo.insert(msg)
+            # 单事务:消息 + 对话建立/复用 + 回复边 + 聚合统计整体一次提交。
+            # 任何一步抛异常都整体回滚,杜绝「消息已落孤儿、对话未挂上」的半提交窗口。
+            self._repo.add(msg)
             self._attach_conversation(msg)
+            self._session.commit()
             logger.info(
                 "消息入库 [%s] %s @ %s (%s): %s",
                 create.message_id,
@@ -253,7 +258,9 @@ class MessageService:
             return True
         except Exception:  # noqa: BLE001  (唯一索引竞态等)
             self._session.rollback()
-            # 竞态导致的重复,直接忽略
+            # 单事务下本笔写入已整体回滚:若这里仍查得到,
+            # 只可能是另一并发事务真正写入了同一条消息(真实重复),忽略即可;
+            # 否则为本次入库失败,向上抛出,不吞成「已入库」。
             if self._repo.exists(create.chat_id, create.message_id):
                 logger.debug("并发重复消息,忽略")
                 return False
@@ -263,17 +270,14 @@ class MessageService:
     def _attach_conversation(self, msg: Message) -> None:
         """把消息挂接到对话表,并维护回复边与对话聚合统计。
 
-        - 确保 conversations 存在(按 chat_id+root_message_id)
+        - 确保 conversations 存在(按 chat_id+root_message_id),并发唯一冲突「存在即复用」
         - 设置 msg.conversation_id
         - 回复消息则写一条 message_links 边(含 depth)
         - 重算对话的 message_count / participant_count / 时间
+        本方法内部不 commit,由 _save 统一提交,保证整笔写入原子性。
         """
         root = msg.root_message_id or msg.message_id
-        conv = self._convo.get(msg.chat_id, root)
-        if conv is None:
-            # 根消息创建对话;非根消息(根未被采集到)暂用当前消息做锚点
-            root_sender = msg.sender_id if (msg.message_id == root) else ""
-            conv = self._convo.create(msg.chat_id, root, root_sender)
+        conv = self._get_or_create_conversation(msg, root)
 
         msg.conversation_id = conv.id
 
@@ -296,7 +300,36 @@ class MessageService:
 
         # 重算聚合统计
         self._convo.update_group_stats(conv.id)
-        self._session.commit()
+
+    def _get_or_create_conversation(self, msg: Message, root: str) -> Conversation:
+        """获取或创建 (chat_id, root_message_id) 对应的对话。
+
+        并发下两个 worker 可能都 get 不到 → 都 create,后者会在唯一键
+        uq_conversation_chat_root 上冲突。这里用 SAVEPOINT(begin_nested)
+        包住 create,冲突时仅回滚本次插入、不污染外层消息事务,随后重新
+        get 复用既有对话行,做到「存在即复用」而非向上抛错。
+        """
+        conv = self._convo.get(msg.chat_id, root)
+        if conv is not None:
+            return conv
+        # 根消息创建对话;非根消息(根未被采集到)暂用当前消息做锚点
+        root_sender = msg.sender_id if (msg.message_id == root) else ""
+        try:
+            with self._session.begin_nested():
+                conv = self._convo.create(msg.chat_id, root, root_sender)
+            return conv
+        except IntegrityError:
+            # 清理本次失败创建的 pending Conversation 对象:失败后它会残留在
+            # session.new 里,若不移除,后续 flush 会重试同一条冲突插入再次报错。
+            for obj in list(self._session.new):
+                if isinstance(obj, Conversation):
+                    self._session.expunge(obj)
+            # 刷新会话状态(失效 id 缓存等),重新 get 复用既有对话行
+            self._session.expire_all()
+            conv = self._convo.get(msg.chat_id, root)
+            if conv is None:
+                raise
+            return conv
 
 
 # ---------------------------------------------------------------- 解析工具

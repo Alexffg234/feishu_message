@@ -1,9 +1,10 @@
 """会话缝合测试(内存 SQLite + 假 LLM)。
 
 验证:按问题处理生命周期(提问→排查→对话→解决)把无回复链、标签缺失/
-垃圾标签的相邻会话合并;方向正确(最早会话为根)、异问题不并、
+垃圾标签的相邻会话**软合并**;方向正确(最早会话为代表)、异问题不并、
 不做跨窗传递闭包、主题冲突护栏(时间间隙已不作护栏)、无 LLM 降级、规划只读、
 幂等、语气词标签守卫。
+阶段三起缝合=软合并:只写 case_id,不删行/不改 root/不搬消息。
 """
 import sys
 from pathlib import Path
@@ -99,16 +100,20 @@ def test_lifecycle_stitch_merges_three_conversations():
     done = stitch_chat(session, CHAT, llm)
     assert len(done) == 2
 
-    convs = session.query(Conversation).all()
-    assert len(convs) == 1, f"应合并为 1 个会话,实际 {len(convs)}"
-    conv = convs[0]
-    assert conv.root_message_id == "m1", "最早会话应保留为根"
-    assert conv.message_count == 3
-    assert conv.participant_count == 3
-
+    # 软合并:3 个会话都保留,只共享同一 case_id(指向最早代表),不物理合并
+    convs = session.query(Conversation).order_by(Conversation.id).all()
+    assert len(convs) == 3, f"软合并应保留 3 个会话,实际 {len(convs)}"
+    case_ids = {c.case_id for c in convs}
+    assert len(case_ids) == 1, f"三会话应共享同一 case_id,实际 {case_ids}"
+    rep = convs[0]
+    assert rep.root_message_id == "m1", "最早会话应为代表"
+    assert rep.case_id == rep.id, "代表应自指向自身"
+    for c in convs[1:]:
+        assert c.case_id == rep.id, f"{c.root_message_id} 应指向代表 {rep.id}"
+    # 不搬消息:root / conversation_id 全都不变
     msgs = {m.message_id: m for m in session.query(Message).all()}
-    assert msgs["m2"].root_message_id == "m1"
-    assert msgs["m3"].conversation_id == conv.id
+    assert msgs["m2"].root_message_id == "m2"
+    assert msgs["m3"].root_message_id == "m3"
     print("lifecycle stitch OK")
 
 
@@ -116,10 +121,12 @@ def test_stitch_idempotent():
     svc, session, Session = _setup()
     _qr_case(svc, session)
     stitch_chat(session, CHAT, FakeLLM("1,2,3"))
-    assert len(session.query(Conversation).all()) == 1
-    # 只剩 1 个会话,再跑无操作
-    assert stitch_chat(session, CHAT, FakeLLM("无")) == []
-    assert len(session.query(Conversation).all()) == 1
+    # 软合并后 3 会话仍在且共享 case_id
+    assert len(session.query(Conversation).all()) == 3
+    assert len({c.case_id for c in session.query(Conversation).all()}) == 1
+    # 再跑:已同组,幂等无新关联
+    assert stitch_chat(session, CHAT, FakeLLM("1,2,3")) == []
+    assert len(session.query(Conversation).all()) == 3
     print("idempotent OK")
 
 

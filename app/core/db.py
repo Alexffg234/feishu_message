@@ -71,6 +71,7 @@ def init_db() -> None:
     _ensure_topic_summary_columns()
     _ensure_topic_group_columns()
     _ensure_case_key_column()
+    _ensure_conversation_case_id()
     logger.info("数据库表结构就绪: %s", mask_db_url(get_settings().database_url))
 
 
@@ -232,6 +233,31 @@ def _ensure_case_key_column() -> None:
             )
         )
         logger.info("messages 表新增列 case_key")
+
+
+def _ensure_conversation_case_id() -> None:
+    """轻量迁移:为存量 conversations 表补 case_id 列(软合并专用)。
+
+    case_id 默认 0=独立案例;由软合并服务打上(指向该案例组的代表会话)。
+    新建表上 create_all 已含该列,这里只处理存量库。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    if "conversations" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("conversations")}
+    if "case_id" in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "ALTER TABLE conversations ADD COLUMN case_id "
+                "BIGINT NOT NULL DEFAULT 0"
+            )
+        )
+        logger.info("conversations 表新增列 case_id")
 
 
 def check_db_connection() -> bool:

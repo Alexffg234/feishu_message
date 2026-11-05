@@ -368,7 +368,87 @@ function switchTab(n){
   if(n === 2 && !statsLoaded){
     statsLoaded = true;
     loadStats();
+    loadCases();
   }
+}
+
+// ---------------------------------------------------------------- 案例软合并管理(阶段三)
+// 展示所有 case_id>0 的案例组,提供「查看时间线 / 确认合并 / 解绑」操作。
+let caseData = [];
+
+async function loadCases(){
+  const box = document.getElementById('casesBox');
+  if(!box) return;
+  box.className = 'empty-note';
+  box.textContent = '加载中…';
+  try{
+    const r = await fetch('/api/cases');
+    const d = await r.json();
+    caseData = (d && d.cases) || [];
+    if(!caseData.length){
+      box.innerHTML = '<span class="empty-note">暂无软合并的案例(有同一案例的多段对话被缝合后出现)</span>';
+      return;
+    }
+    let html = '';
+    for(const g of caseData){
+      html += '<div class="case-row">'
+        + '<div class="case-head"><span class="topic-name">'+esc(g.topic||'(未分类)')+'</span>'
+        + '<span class="topic-stat">'+g.member_count+' 段对话</span>'
+        + '<span class="topic-stat">最近 '+fmtMs(g.last_message_at_ms)+'</span>'
+        + '</div>'
+        + '<div class="case-actions">'
+        + '<button class="regen" onclick="viewCaseTimeline('+g.case_id+')">查看完整时间线</button>'
+        + '<button class="regen" onclick="confirmMergeCase('+g.case_id+')">确认合并(物理)</button>'
+        + '<button class="danger" onclick="unlinkCase('+g.case_id+')">解绑</button>'
+        + '</div>'
+        + '<div class="case-tl" id="caseTl'+g.case_id+'" style="display:none"></div>'
+        + '</div>';
+    }
+    box.innerHTML = html;
+    box.className = '';
+  }catch(e){
+    box.textContent = '案例加载失败: ' + e;
+  }
+}
+
+async function viewCaseTimeline(case_id){
+  const tl = document.getElementById('caseTl'+case_id);
+  if(!tl) return;
+  if(tl.style.display === 'block'){ tl.style.display='none'; return; }
+  tl.innerHTML = '<span class="empty-note">加载中…</span>';
+  tl.style.display = 'block';
+  try{
+    const r = await fetch('/api/cases/'+case_id+'/timeline');
+    if(!r.ok){ tl.innerHTML = '<span class="empty-note">加载失败</span>'; return; }
+    const d = await r.json();
+    tl.innerHTML = (d.messages||[]).map(m => {
+      const who = m.sender_name ? m.sender_name : (m.sender_id ? shortId(m.sender_id) : '?');
+      return '<div class="msg"><div class="who">'+esc(who)+'<span class="mtime">'+esc(fmtMs(m.create_time))+'</span></div>'
+        + '<div class="body">'+msgBodyHtml(m)+'</div></div>';
+    }).join('') || '<span class="empty-note">该案例暂无消息</span>';
+  }catch(e){
+    tl.innerHTML = '<span class="empty-note">加载失败: '+e+'</span>';
+  }
+}
+
+async function confirmMergeCase(case_id){
+  if(!confirm('确认将该案例的 '+case_id+' 组对话物理合并为一条(不可逆,仅最早会话保留为根)?\n解绑仍可回滚,此操作请务必确认。')) return;
+  try{
+    const r = await fetch('/api/cases/'+case_id+'/merge', {method:'POST'});
+    const d = await r.json();
+    alert('已物理合并 '+((d&&d.merged)||0)+' 个源会话');
+    loadCases(); loadStats();
+  }catch(e){ alert('操作失败: '+e); }
+}
+
+async function unlinkCase(case_id){
+  if(!confirm('确认解绑该案例组?将把相关会话 case_id 全部归 0(仅取消关联,消息与数据不丢失,可重新缝合)。')) return;
+  try{
+    const r = await fetch('/api/cases/'+case_id+'/unlink', {method:'POST'});
+    const d = await r.json();
+    alert('已解绑 '+((d&&d.unlinked)||0)+' 个会话');
+    loadCases();
+  }catch(e){ alert('操作失败: '+e); }
 }
 
 window.addEventListener('DOMContentLoaded', loadConversations);

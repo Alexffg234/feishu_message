@@ -1,9 +1,10 @@
-"""会话缝合:LLM 判定同群相邻会话是否同一问题处理生命周期,是则合并。
+"""会话缝合:LLM 判定同群相邻会话是否同一问题处理生命周期,是则软合并。
 
 与同标签归并(group_merge)互补:同标签归并依赖 LLM 标签,标签缺失或
 垃圾标签(如"好的")时失效;本模块直接把相邻会话的代表消息喂给 LLM,
 按「提出问题 → 排查问题 → 多轮对话 → 给出解决方案」的生命周期判定
-是否同一处理过程,再复用 merge_groups 合并(最早会话保留为根)。
+是否同一处理过程,再调用 case_merge.soft_link_cases 做**软合并**
+(只打相同 case_id,可回滚;阶段三起不再物理合并)。
 不依赖标签锚点,幂等可重跑。
 
 窗口策略:按时间升序取相邻 _BATCH_SIZE 个会话送 LLM,窗口步进
@@ -14,7 +15,8 @@ _BATCH_STEP(重叠 1 个,边界会话会被两个窗口共同判定),每个窗�
 安全护栏(LLM 误判防护):
 - 标签冲突:双方都有非空 topic 且不同时不合并(已有确定标签是强反证);
 - 无时间间隙护栏:是否同一案例完全交由 LLM 判定,长间隔(如隔夜)的同案例续聊
-  同样可以缝合合并。
+  同样可以缝合合并;
+- 软合并可回滚:LLM 误判只会产生可解绑的 case_id 关联,不再损伤主数据。
 """
 from __future__ import annotations
 
@@ -26,10 +28,18 @@ from sqlalchemy.orm import Session
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.services.case_key import conversation_case_key
-from app.services.group_merge import merge_groups
+from app.services.case_merge import soft_link_cases
 from app.services.llm import LLMError
 
 logger = logging.getLogger(__name__)
+
+# 缝合计数(进程内,仅供 /api/cases/stats 展示近似值;多 worker 各自累计)
+_stitch_stats = {"case_key": 0, "llm": 0}
+
+
+def get_stitch_counts() -> tuple[int, int]:
+    """返回 (确定性锚点缝合对数, LLM 缝合对数)。"""
+    return _stitch_stats["case_key"], _stitch_stats["llm"]
 
 # 每批送 LLM 的相邻会话数上限
 _BATCH_SIZE = 5
@@ -188,6 +198,7 @@ def plan_stitches(
             pairs.append((src_c.id, tgt_c.id))
             claimed.add(src_g)
             _window_claimed = True
+            _stitch_stats["case_key"] += 1
             logger.info(
                 "会话缝合(确定性 case_key) %s: #%d -> #%d 同一设备",
                 chat_id, src_c.id, tgt_c.id,
@@ -226,6 +237,7 @@ def plan_stitches(
                 continue
             pairs.append((src_c.id, tgt_c.id))
             claimed.add(g)
+            _stitch_stats["llm"] += 1
         claimed.add(target)
     return pairs
 
@@ -235,21 +247,19 @@ def stitch_chat(
     chat_id: str,
     llm,
 ) -> list[tuple[int, int]]:
-    """执行会话缝合,返回实际合并的 (源会话id, 目标会话id) 列表。
+    """执行会话缝合(软合并),返回实际关联的 (源会话id, 目标会话id) 列表。
 
-    缝合语义 = 同一问题处理生命周期的续聊(护栏保证 <6 小时),
-    视为同一问题不断句:不打新问题块起点标记,前端不画横杠。
-    (不同案例靠同标签归并 merge_topic_group 路径,那里保留横杠标记。)
+    阶段三起,缝合语义从「物理合并」降级为「软合并」:
+    - 只给相关会话打相同 case_id(可回滚关联),不删行、不改 root、不搬消息;
+    - 误合可一键解绑(case_id 归 0),不再产生不可逆数据损坏;
+    - 同一问题处理生命周期(提问→排查→对话→解决)的续聊不断句、不画横杠;
+      (不同案例靠同标签归并 merge_topic_group 路径,那里保留横杠标记。)
+    - 物理合并(真合并)由管理员在确认后通过 /api/cases/{id}/merge 触发,不在此自动做。
     """
     done: list[tuple[int, int]] = []
     for src_id, tgt_id in plan_stitches(session, chat_id, llm):
-        src = session.get(Conversation, src_id)
-        tgt = session.get(Conversation, tgt_id)
-        if src is None or tgt is None:
-            continue
-        if merge_groups(
-            session, chat_id, src.root_message_id, tgt.root_message_id,
-            tgt.topic or "", mark_block_start=False,
-        ):
+        if soft_link_cases(session, chat_id, src_id, tgt_id):
             done.append((src_id, tgt_id))
+    if done:
+        session.commit()
     return done

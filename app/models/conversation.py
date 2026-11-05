@@ -41,6 +41,11 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)
     # LLM 主题标签(沿用 messages.topic 语义),空=未分类
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
+    # 所属案例组代表会话 id;0=独立案例。
+    # 软合并专用:同一案例的多段对话共享同一 case_id(指向该组最早会话),只关联不移行。
+    case_id: Mapped[int] = mapped_column(
+        BigIntPK, nullable=False, default=0, index=True
+    )
     message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     participant_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -57,6 +62,8 @@ class Conversation(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "root_message_id", name="uq_conversation_chat_root"),
         Index("ix_conversations_updated_at", "updated_at"),
+        # 软合并:按「群+案例」聚合查询(展示/统计)
+        Index("ix_conversations_chat_case", "chat_id", "case_id"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

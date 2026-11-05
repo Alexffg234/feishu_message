@@ -511,6 +511,146 @@ def api_topic_aliases_delete(alias: str, db: Session = Depends(get_session)) -> 
     return {"deleted": alias}
 
 
+# ---------------------------------------------------------------- 案例软合并(阶段三)
+@router.get("/api/cases/stats")
+def api_cases_stats(db: Session = Depends(get_session)) -> dict:
+    """软合并指标(阶段三最小量化集),只读不写库。
+
+    - case_groups / linked_conversations / unclassified: 软合并组数/涉及会话数/独立会话数
+    - case_key_stitches / llm_stitches: 确定性锚点 vs LLM 缝合计数(日志累计,进程内近似)
+    """
+    from sqlalchemy import func
+
+    from app.services.conv_stitch import get_stitch_counts
+
+    linked = (
+        db.query(func.count(Conversation.id))
+        .where(Conversation.case_id != 0)
+        .scalar()
+        or 0
+    )
+    case_groups = (
+        db.query(func.count(func.distinct(Conversation.case_id)))
+        .where(Conversation.case_id != 0)
+        .scalar()
+        or 0
+    )
+    unclassified = (
+        db.query(func.count(Conversation.id))
+        .where(Conversation.case_id == 0)
+        .scalar()
+        or 0
+    )
+    ck, llm_n = get_stitch_counts()
+    return {
+        "case_groups": int(case_groups),
+        "linked_conversations": int(linked),
+        "independent_conversations": int(unclassified),
+        "case_key_stitches": ck,
+        "llm_stitches": llm_n,
+    }
+
+
+@router.get("/api/cases")
+def api_cases_list(db: Session = Depends(get_session)) -> dict:
+    """列出全部软合并案例组(case_id>0 去重),附成员概览,供「待确认」列表。"""
+    from sqlalchemy import func
+
+    rows = (
+        db.query(
+            Conversation.chat_id,
+            Conversation.case_id,
+            func.count(Conversation.id).label("cnt"),
+            func.min(Conversation.id).label("rep_id"),
+            func.max(Conversation.last_message_at_ms).label("last_ms"),
+        )
+        .where(Conversation.case_id != 0)
+        .group_by(Conversation.chat_id, Conversation.case_id)
+        .order_by(Conversation.chat_id, func.min(Conversation.id))
+        .all()
+    )
+    groups = []
+    for chat_id, case_id, cnt, rep_id, last_ms in rows:
+        rep = db.get(Conversation, rep_id)
+        groups.append(
+            {
+                "chat_id": chat_id,
+                "case_id": int(case_id),
+                "member_count": int(cnt),
+                "topic": rep.topic if rep else "",
+                "root_message_id": rep.root_message_id if rep else "",
+                "last_message_at_ms": int(last_ms or 0),
+            }
+        )
+    return {"cases": groups}
+
+
+@router.get("/api/cases/{case_id}/timeline")
+def api_case_timeline(case_id: int, db: Session = Depends(get_session)) -> dict:
+    """某案例组的完整时间线:跨会话、按时间平铺的消息(供前端聚合渲染)。"""
+    from app.dao.conversation_repo import ConversationRepo
+    from app.services.user_name_service import fill_tree_sender_names
+
+    convs = (
+        db.query(Conversation)
+        .where(Conversation.case_id == case_id)
+        .order_by(Conversation.id)
+        .all()
+    )
+    if not convs:
+        raise HTTPException(status_code=404, detail="案例组不存在")
+    chat_id = convs[0].chat_id
+
+    flat = []
+    for c in convs:
+        tree = ConversationRepo(db).list_tree(c.id)
+        for node in tree["roots"]:
+            flat.extend(_walk_tree(node))
+    # 去重(同一消息可能在多节点父链上),按时间/消息序排
+    seen: set[str] = set()
+    out = []
+    for m in flat:
+        if m["message_id"] in seen:
+            continue
+        seen.add(m["message_id"])
+        out.append(m)
+    fill_tree_sender_names(out)
+    out.sort(key=lambda m: (int(m["create_time"]) if m["create_time"].isdigit() else 0, m["message_id"]))
+    return {"chat_id": chat_id, "case_id": case_id, "messages": out}
+
+
+def _walk_tree(node: dict):
+    """把 list_tree 的嵌套节点平铺为 [dict, ...](深度优先)。"""
+    out = [node["message"]]
+    for ch in node.get("children") or []:
+        out.extend(_walk_tree(ch))
+    return out
+
+
+@router.post("/api/cases/{case_id}/merge")
+def api_case_merge(case_id: int, db: Session = Depends(get_session)) -> dict:
+    """管理员确认:把案例组物理合并为一条对话(并入最早会话为根)。"""
+    from app.services.case_merge import merge_case
+
+    conv = db.query(Conversation).filter(Conversation.case_id == case_id).first()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="案例组不存在")
+    merged = merge_case(db, conv.chat_id, case_id)
+    return {"case_id": case_id, "merged": merged}
+
+
+@router.post("/api/cases/{case_id}/unlink")
+def api_case_unlink(case_id: int, db: Session = Depends(get_session)) -> dict:
+    """解绑案例组:共享该 case_id 的会话全部归 0(可回滚,数据零损失)。"""
+    from app.services.case_merge import unlink_case
+
+    conv = db.query(Conversation).filter(Conversation.case_id == case_id).first()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="案例组不存在")
+    n = unlink_case(db, conv.chat_id, case_id, commit=True)
+    return {"case_id": case_id, "unlinked": n}
+
+
 class TopicKnowledgeIn(BaseModel):
     """主题参考知识库入参:同名 upsert,整体覆盖 content。"""
 

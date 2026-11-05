@@ -72,8 +72,11 @@ def test_run_round_merges_and_watermark_skips():
     service = ConvStitchService(session_factory=Session, llm=llm, interval_seconds=999)
 
     n = service.run_round()
-    assert n == 2, f"应合并 2 对,实际 {n}"
-    assert len(session.query(Conversation).all()) == 1
+    assert n == 2, f"应软合并 2 对,实际 {n}"
+    # 软合并:3 会话保留并共享同一 case_id
+    convs = session.query(Conversation).all()
+    assert len(convs) == 3
+    assert len({c.case_id for c in convs}) == 1
     assert len(llm.calls) == 1
 
     # 无新消息:水位线不变,跳过,不再调 LLM
@@ -85,17 +88,27 @@ def test_run_round_merges_and_watermark_skips():
 def test_new_message_triggers_replan():
     svc, session, Session = _setup()
     _three_case(svc, session)
-    llm = FakeLLM("1,2,3", "1,2")
+    llm = FakeLLM("1,2,3", "1,4")
     service = ConvStitchService(session_factory=Session, llm=llm, interval_seconds=999)
     assert service.run_round() == 2
     assert len(llm.calls) == 1
 
-    # 新消息(同一案例的后续碎片)→ 水位线变化,重新判定并合并
+    # 新消息(同一案例的后续碎片)→ 水位线变化,重新判定并软合并 m4 -> m1 组
     svc.save_message(_msg("m4", "u1", T0 + 600_000, text="还是不行,麻烦再看看"))
+    svc.save_message(_msg("m5", "u2", T0 + 700_000, text="我先处理一下"))
     session.commit()
     assert service.run_round() == 1
     assert len(llm.calls) == 2
-    assert len(session.query(Conversation).all()) == 1
+    convs = session.query(Conversation).order_by(Conversation.id).all()
+    assert len(convs) == 5
+    by_root = {c.root_message_id: c for c in convs}
+    # m1 组:代表自指向,成员(m2/m3/m4)指向 m1
+    rep = by_root["m1"]
+    assert rep.case_id == rep.id
+    for r in ("m2", "m3", "m4"):
+        assert by_root[r].case_id == rep.id, f"{r} 应并入 m1 组"
+    # m5 未被判定,保持独立
+    assert by_root["m5"].case_id == 0
     print("replan on new message OK")
 
 
@@ -125,7 +138,8 @@ def test_stitch_no_block_start_for_continuation():
     llm = FakeLLM("1,2")
     service = ConvStitchService(session_factory=Session, llm=llm, interval_seconds=999)
     assert service.run_round() == 1
-    assert len(session.query(Conversation).all()) == 1
+    assert len(session.query(Conversation).all()) == 2
+    assert len({c.case_id for c in session.query(Conversation).all()}) == 1
 
     flags = [m.block_start for m in session.query(Message).all()]
     assert all(f == 0 for f in flags), f"续聊缝合不应打横杠标记,实际 {flags}"

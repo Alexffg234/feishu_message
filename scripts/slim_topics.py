@@ -38,6 +38,10 @@
 - 默认 dry-run;`--apply` 写库前把**每条消息的原始 topic** 快照到
   `data/topic_slim_backup-<ts>.json`,`--restore` 逐条还原(合并是 N→1 的,
   没有快照就再也分不开)。
+- `--apply` 还会自动抓**前后两份指标快照**(`data/metrics-before-*.json` /
+  `metrics-after-*.json`)并打印对比。「前」只能在写库那一刻抓:apply 之后
+  `messages.topic` 已改写,库里的「前」状态不复存在。抓取失败不阻断写库,
+  但会明确报出来。
 - 生产库若缺 `stage` 列(说明代码没部署或没重启),**拒绝 --apply**:此时摘掉
   「已推」「上门维修」会连唯一的进度信号一起丢掉。
 """
@@ -326,6 +330,39 @@ def preflight(bind=None) -> tuple[list[str], list[str]]:
 
 
 # ---------------------------------------------------------------- 报表
+def summarize_plan(state: dict, plan: dict | None = None) -> dict:
+    """方案摘要,塞进指标快照,让「前后对比」能解释未分类为什么上升。
+
+    只靠两份指标快照是**无法**把「标签减少 8 个」拆成「合并几个 / 清空几个」的:
+    合并掉的标签组换了名字,清空的标签组回到未分类,两种在聚合数字上都是
+    「标准标签变少 + 未分类变多」。所以把方案自己的统计一起存下来。
+    """
+    used = state.get("used") or {}
+    merged = kept = cleared = 0
+    cleared_labels: list[str] = []
+    cleared_groups = 0
+    for old in MERGES:
+        new = (MERGES[old] or "").strip()
+        info = used.get(old) or {"groups": 0, "msgs": 0}
+        if not new:
+            cleared += 1
+            if info["groups"]:
+                cleared_labels.append(old)
+                cleared_groups += info["groups"]
+        elif old == new:
+            kept += 1
+        else:
+            merged += 1
+    return {
+        "merged": merged,
+        "kept": kept,
+        "cleared": cleared,
+        "cleared_labels": cleared_labels,
+        "cleared_groups": cleared_groups,
+        "target_standards": len((plan or {}).get("standards") or []) or None,
+    }
+
+
 def render_report(state: dict, plan: dict) -> str:
     standards, group_of = plan["standards"], plan["group_of"]
     used = state["used"]
@@ -401,8 +438,26 @@ def render_report(state: dict, plan: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- 指标快照
+def _try_capture(session, label: str, backup_dir: Path, summary: dict):
+    """抓一份指标快照(best-effort),失败不阻断写库。
+
+    为什么不阻断:apply 的主职责是改体系;抓不到基线会让「前后对比」不可用,
+    但比「用户已经确认过方案、却被一个统计接口挡回去」要好。失败时明确报出来,
+    别让人以为对比没做是因为没差异。
+    """
+    try:
+        from metrics_snapshot import save as save_metrics
+
+        return save_metrics(session, label, backup_dir, plan=summary)
+    except Exception as e:  # noqa: BLE001 —— 快照失败原因很多(缺列/服务未就绪),一律降级
+        print(f"  ! 无法抓取 {label} 指标快照:{e}")
+        print("    (不影响写库;但这次改造的前后对比不可用)")
+        return None
+
+
 # ---------------------------------------------------------------- 落库
-def _snapshot(session, plan: dict, backup_dir: Path) -> Path:
+def _snapshot(session, plan: dict, backup_dir: Path, extra: dict | None = None) -> Path:
     """把逐条原始 topic 存盘。合并是 N→1,没有快照就再也分不开。"""
     msgs = session.execute(
         text("SELECT id, topic FROM messages WHERE topic <> ''")
@@ -428,13 +483,27 @@ def _snapshot(session, plan: dict, backup_dir: Path) -> Path:
         "messages": {str(r[0]): r[1] for r in msgs},
         "conversations": {str(r[0]): r[1] for r in convs},
     }
+    if extra:
+        payload.update(extra)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
-def apply_plan(session, plan: dict, backup_dir: Path) -> dict:
+def apply_plan(session, plan: dict, backup_dir: Path, state: dict | None = None) -> dict:
     """写库:替换大组 -> 回刷 messages/conversations -> 写别名。"""
-    backup_path = _snapshot(session, plan, backup_dir)
+    state = state or collect_state(session)
+    summary = summarize_plan(state, plan)
+
+    # 「前」的指标只能在这里抓:apply 之后 messages.topic 已被改写,库里的
+    # 「前」状态不复存在(只剩 backup 里的原始 topic,要重算就得整库回滚)。
+    metrics_before = _try_capture(session, "before", Path(backup_dir), summary)
+
+    backup_path = _snapshot(
+        session,
+        plan,
+        Path(backup_dir),
+        extra={"metrics_before": str(metrics_before) if metrics_before else ""},
+    )
 
     # 1) 大组整体替换(parent 一律清空 = 压平为两层)
     # created_at 是 Python 侧默认值,原生 INSERT 不会触发,必须显式给
@@ -500,12 +569,19 @@ def apply_plan(session, plan: dict, backup_dir: Path) -> dict:
             written += 1
 
     session.commit()
+
+    # 「后」的指标在提交之后抓 —— 立刻抓是对的:这一刻的未分类率就是改造的
+    # 直接后果;过几天再抓,里面就混进了人工定标的进度,不再是「改造效果」。
+    metrics_after = _try_capture(session, "after", Path(backup_dir), summary)
+
     return {
         "backup": str(backup_path),
         "moved_msgs": moved_msgs,
         "cleared_msgs": cleared_msgs,
         "moved_conv": moved_conv,
         "aliases": written,
+        "metrics_before": str(metrics_before) if metrics_before else "",
+        "metrics_after": str(metrics_after) if metrics_after else "",
     }
 
 
@@ -614,7 +690,7 @@ def main() -> int:
             print("确定要现在写就加 --force(会丢掉「已推」「上门维修」的进度信号)。")
             return 2
 
-        res = apply_plan(session, plan, Path(args.backup_dir))
+        res = apply_plan(session, plan, Path(args.backup_dir), state=state)
         print("\n== 已写入 ==")
         print(f"  大组:替换为 {len(NEW_GROUPS)} 个(压平,无子组)")
         print(f"  消息:改写 {res['moved_msgs']} 条,清空 {res['cleared_msgs']} 条")
@@ -622,6 +698,18 @@ def main() -> int:
         print(f"  别名:新增 {res['aliases']} 条")
         print(f"  备份:{res['backup']}")
         print(f"  回滚:python scripts/slim_topics.py --restore {res['backup']}")
+
+        if res["metrics_before"] and res["metrics_after"]:
+            from metrics_snapshot import load, render_diff
+
+            print("")
+            print(render_diff(load(Path(res["metrics_before"])),
+                              load(Path(res["metrics_after"]))))
+            print("")
+            print(f"  基线快照:{res['metrics_before']}")
+            print(f"  改造后快照:{res['metrics_after']}")
+            print("  (过几天想看人工定标的进展,再抓一份对比:"
+                  "python scripts/metrics_snapshot.py --save later)")
         return 0
 
 

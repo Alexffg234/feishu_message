@@ -367,6 +367,29 @@ def test_metrics_exposes_review_block():
     assert r["review"]["human_rate"] == 0.5
 
 
+# ---------------------------------------------------------------- 页面入口
+def test_review_page_assets_exist():
+    """页面缺失时 /review 直接 500,而且这版前端是这套闭环的唯一入口。
+
+    锁三件事:三个静态文件都在、页面引用的资源确实存在、导航里有链接——
+    缺任何一个,人工闭环在界面上就等于不存在(只剩 curl)。
+    """
+    from app.api.routes import STATIC_DIR
+
+    for name in ("review.html", "review.js", "review.css"):
+        assert (STATIC_DIR / name).is_file(), f"缺少 app/static/{name}"
+
+    html = (STATIC_DIR / "review.html").read_text(encoding="utf-8")
+    # 页面引用的每个静态资源都必须真实存在(改名/删文件不会只挂一半)
+    import re
+
+    for ref in re.findall(r'/static/([\w.\-]+)', html):
+        assert (STATIC_DIR / ref).is_file(), f"review.html 引用了不存在的 {ref}"
+
+    nav = (STATIC_DIR / "nav.js").read_text(encoding="utf-8")
+    assert "'/review'" in nav, "导航里没有 /review 入口,页面等于藏起来了"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

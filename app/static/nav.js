@@ -10,7 +10,8 @@
 
   var LINKS = [
     { href: '/summary', text: '群聊总结' },
-    { href: '/habits', text: '对话习惯' }
+    { href: '/habits', text: '对话习惯' },
+    { href: '/review', text: '标签复核' }
   ];
 
   var LOGO_SVG =

@@ -56,6 +56,7 @@ feishu_message/
 | `static/login.{html,css,js}` | 登录 / 注册页 |
 | `static/summary.{html,css,js}` | 群聊总结页 |
 | `static/habits.{html,css,js}` | 对话习惯分析页 |
+| `static/review.{html,css,js}` | 标签复核页(`/review`):低置信队列 → 人工定标 → gold set |
 
 约定与注意事项:
 
@@ -537,6 +538,27 @@ python scripts/topic_review.py --gold --eval            # 重跑判别算 top-1 
 评估准确率必须走与线上**同一条**判别路径(`predict_group` 复用
 `_decide_label`),否则量出来的不是线上的准确率。
 
+#### 复核页面(`/review`)
+
+队列和 gold set 原来只有 curl 能看,而这套闭环的价值全在「有人真的去定标」——
+没有页面就等于没人用。页面做的事和脚本完全一致,只是把逐条定标变成点一下:
+
+- **顶部统计**:待复核组数 / 本页未分类 / 本页低置信 / gold 组数 / 人工覆盖率。
+  「待复核」不降说明闭集缺类或提示词不到位;`gold_groups=0` 时所有准确率都不作数。
+- **队列卡片**:未分类优先(问题更大),再按组内最新时间倒序;每组带样本文本、
+  现值与置信度。输入框带标准标签提示(按大类分组),**回车即提交**。
+- **提交反馈**:成功会说明「旧值 → 新值、影响几条、学了哪个别名、连带回刷几条」,
+  卡片随即移出队列;失败(标签收敛不到标准集)会原样保留卡片并显示拒绝原因。
+- **两个可选项**:`连带回刷同错标签` = 脚本的 `--propagate`;`允许闭集外` = `--allow-new`
+  (慎用,建议只给真正缺失的现象用)。
+- **导出 CSV**:字段与 `scripts/topic_review.py --export` 逐列一致,**页面上已填但没提交
+  的值也会带上**,所以可以「先在页面批量填一遍 → 导出 → 交给脚本 `--csv --apply`」。
+- **权限**:定标接口要求 `admin`。普通成员进页面看到的是只读态(横幅 + 禁用输入),
+  不会填完才吃 403。
+
+> 页面只负责「定标」这一个动作。批量/回刷/评估准确率仍在脚本里:
+> `--gold --eval` 需要 LLM,不适合放进请求周期。
+
 ## 鉴权提示
 
 `/healthz` 提供**可观测性探活**（免登录），返回数据库连通、事件队列积压、死信数量、最近入库时间（数据新鲜度）：
@@ -568,6 +590,13 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **人工复核页面 `/review`:让闭环真的有人用**
+  - 新增 `app/static/review.{html,js,css}` + `GET /review`:`nav.js` 加入「标签复核」入口
+  - 队列卡片带样本文本、现值、置信度;输入框按大类分组提示标准标签,**回车即提交**;成功说出「旧值 → 新值 / 影响几条 / 学了哪个别名 / 连带回刷几条」并把卡片移出队列,失败原样保留并显示拒绝原因
+  - 顶部统计直出 `pending_groups` / 未分类 / 低置信 / `gold_groups` / `human_rate`——`gold_groups=0` 时提醒「所有准确率都不作数」
+  - **导出 CSV 与 `scripts/topic_review.py --export` 逐列一致**,且会带上「页面已填但未提交」的值,支持「页面批量填 → 导出 → 脚本 `--csv --apply`」
+  - 非 admin 进页面直接只读态(横幅 + 禁用输入 + `只读` 按钮),不再填完才吃 403;提交遇 401 引导重新登录
+  - 新增 `tests/test_topic_review.py::test_review_page_assets_exist`:三个静态文件都在、`review.html` 引用的资源真实存在、导航里有入口(单测断言,防「改了路径忘了建文件」)
 - **人工复核闭环:低置信队列 -> 人工定标 -> 反哺别名 -> gold set**
   - 新增 `app/services/topic_review.py`:`list_review_queue`(未分类 + 低置信,未分类优先)、`apply_review`(回写三处 + 学别名 + 可选回刷)、`gold_stats` / `eval_gold`
   - 新增 `messages.topic_source`(`llm`/`human`),轻量迁移 `_ensure_stage_columns` 一并加列;人工确认的组不再进队列,并作为准确率评估基线

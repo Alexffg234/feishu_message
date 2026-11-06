@@ -978,6 +978,16 @@ def habits_page() -> HTMLResponse:
     return _page("habits.html")
 
 
+@router.get("/review", response_class=HTMLResponse)
+def review_page() -> HTMLResponse:
+    """标签复核页面(app/static/review.html)。
+
+    复核队列 / gold set 之前只有 curl 能看,而这套闭环的价值全在「有人真的
+    去定标」——没有页面就等于没人用,所以给它一个入口。
+    """
+    return _page("review.html")
+
+
 def _page(filename: str) -> HTMLResponse:
     """返回 app/static/ 下的页面文件(顶部导航由 static/nav.js 统一渲染)。"""
     page = STATIC_DIR / filename

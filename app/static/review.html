@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>标签复核</title>
+<link rel="stylesheet" href="/static/components.css?v=1.0.0">
+<link rel="stylesheet" href="/static/review.css?v=1.0.0">
+</head>
+<body>
+<div id="app-nav"></div>
+<div class="wrap">
+  <h1 class="page-title">标签复核</h1>
+  <div class="page-sub">未分类 / 低置信组逐条定标 · 确认即入 gold set · 错误标签自动沉淀为别名</div>
+
+  <div class="rv-bar">
+    <input id="chatId" class="rv-input rv-input--wide" placeholder="chat_id(留空=全部群)">
+    <label class="rv-field">低置信线
+      <select id="lowConf" class="select">
+        <option value="0.4">0.40</option>
+        <option value="0.5" selected>0.50</option>
+        <option value="0.6">0.60</option>
+        <option value="0.7">0.70</option>
+      </select>
+    </label>
+    <button class="btn" type="button" id="btnReload">刷新队列</button>
+    <button class="btn btn--ghost" type="button" id="btnExport">导出 CSV</button>
+    <button class="btn btn--ghost" type="button" id="btnGold">gold set</button>
+    <span class="rv-stamp" id="stamp"></span>
+  </div>
+
+  <div class="rv-ro" id="roBar" hidden>
+    当前账号不是管理员,只能查看队列、不能定标(定标接口要求 admin)。
+  </div>
+
+  <div class="rv-stats" id="stats"></div>
+
+  <div class="card rv-gold" id="goldPanel" hidden>
+    <h2 class="rv-gold__title">gold set(人工确认过的组 = 唯一可信的准确率基线)</h2>
+    <div id="goldBody"></div>
+  </div>
+
+  <div class="rv-note">
+    定标会做三件事:写回该组(置 <code>topic_source=human</code>、置信度 1.0)→
+    若原标签是非标准标签则写进别名表(以后同类输出自动收敛)→ 该组进入 gold set。
+    标签必须是标准标签;手写近似词会先做一次相似度归一化,归不到标准集就拒绝且<strong>不改库</strong>。
+  </div>
+
+  <div id="queue"><div class="loading">加载中…</div></div>
+</div>
+
+<datalist id="stdLabels"></datalist>
+<div class="rv-toast" id="toast" hidden></div>
+
+<script src="/static/nav.js?v=1.0.0" defer></script>
+<script src="/static/review.js?v=1.0.0" defer></script>
+</body>
+</html>

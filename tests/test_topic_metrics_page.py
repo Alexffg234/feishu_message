@@ -88,6 +88,47 @@ def test_nav_links_to_metrics_page():
     assert "/metrics" in nav
 
 
+def test_verdict_actions_link_to_review():
+    """诊断横幅必须给出可点击的下一步,而不是只甩一句「该跑某个脚本」。
+
+    这条锁的是「结论能直接落到处理」:需要人看/定标的结论要带站内跳转到
+    /review,并且文案里要明确指向复核页。去掉 cta 就等于退回「只告警不指路」。
+    """
+    from app.api.routes import STATIC_DIR
+
+    js = (STATIC_DIR / "metrics.js").read_text(encoding="utf-8")
+    assert "cta: { href: '/review'" in js, "横幅里没有指向 /review 的跳转"
+    assert "/review" in js
+    # 至少两个入口:gold=0(定标)、未分类率(看样本文本)
+    assert js.count("href: '/review'") >= 2
+
+
+def test_verdict_commands_are_copied_not_executed():
+    """命令行只能复制,网页端不执行脚本。
+
+    这不是「懒得做」:页面没有任何执行入口,也不该为了省一次 SSH 去开一个
+    「在服务器上跑任意脚本」的 HTTP 接口。所以锁两件事 —— 有复制实现,
+    且没有发出任何执行类请求。
+    """
+    from app.api.routes import STATIC_DIR
+
+    js = (STATIC_DIR / "metrics.js").read_text(encoding="utf-8")
+    assert "clipboard.writeText" in js, "缺少剪贴板复制"
+    assert "execCommand('copy')" in js, "http(非安全上下文)下 clipboard 不可用,需要兜底"
+    # 不允许出现任何「把命令发给后端执行」的痕迹
+    for bad in ("/api/exec", "/api/run", "child_process", "subprocess"):
+        assert bad not in js, f"页面里出现了执行类能力:{bad}"
+
+
+def test_verdict_action_styles_exist():
+    """按钮/命令行没有样式就是裸链接和裸 pre,视觉上和正文混在一起。"""
+    from app.api.routes import STATIC_DIR
+
+    css = (STATIC_DIR / "metrics.css").read_text(encoding="utf-8")
+    for cls in (".mt-v__ops", ".mt-v__btn", ".mt-v__copy", ".mt-v__cmd"):
+        assert cls in css, f"metrics.css 缺少 {cls}"
+
+
 def test_metrics_route_serves_html():
     """路由返回的是 FileResponse(不是字符串),所以查 path 而不是 body。"""
     from app.api.routes import metrics_page

@@ -82,6 +82,11 @@
   }
 
   /* --------------------------------------------------------- 诊断横幅 */
+  /* 每条结论带两类可操作入口:
+       cta = { href, label } → 站内跳转(需要人看/定标的,一律去 /review)
+       cmd = 'python scripts/xxx.py ...' → 只能在服务器跑的脚本,给「复制命令」
+     刻意区分:网页端不执行脚本(没有、也不该有执行能力),所以命令只复制不运行;
+     而「看一眼、定个标」这类事本来就是人做的,直接把人送过去。 */
   function verdicts(m) {
     var out = [];
     var un = m.unclassified || {};
@@ -95,7 +100,8 @@
       out.push({
         level: 'danger',
         text: '还没有任何人工确认的组(gold set = 0)。',
-        action: '没有基准,下面的准确率类指标都只是模型自说自话。先去 <code>/review</code> 定标二三十组。'
+        action: '没有基准,下面的准确率类指标都只是模型自说自话。定标二三十组之后,这里的每个数才有意义。',
+        cta: { href: '/review', label: '去复核定标' }
       });
     }
 
@@ -105,23 +111,29 @@
       out.push({
         level: 'danger',
         text: '未分类率 ' + pct(rate) + '(' + num(un.groups) + '/' + num(un.total_groups) + ' 组),已经过 ' + pct(TH.unclassifiedDanger, 0) + '。',
-        action: '闭集缺现象,不是模型不行。用 <code>scripts/unclassified.py --words</code> 看这批组在说什么、缺哪个大类。'
+        action: '闭集缺现象,不是模型不行。先看这批组在说什么、缺哪个大类,再决定补标准标签还是补别名。',
+        cta: { href: '/review', label: '去复核未分类组' },
+        cmd: 'python scripts/unclassified.py --words'
       });
     } else if (un.total_groups && rate >= TH.unclassifiedWarn) {
       out.push({
         level: 'warn',
         text: '未分类率 ' + pct(rate) + '(' + num(un.groups) + ' 组),超过 ' + pct(TH.unclassifiedWarn, 0) + ' 的警戒线。',
-        action: '先看是不是别名表漏了 near-miss:跑 <code>scripts/suggest_aliases.py</code>,达标再 <code>--apply</code>。'
+        action: '先看是不是别名表漏了 near-miss(少写/多写「类问题」后缀这种),达标再 --apply。',
+        cta: { href: '/review', label: '去复核未分类组' },
+        cmd: 'python scripts/suggest_aliases.py'
       });
     }
 
     // 3. 非标准标签漏网 = 别名没收敛住
+    //    这批组是有标签的,不在复核队列里,所以不给 /review 入口(会误导)。
     var offN = Number(sc.off_standard_count) || 0;
     if (offN > 0) {
       out.push({
         level: 'warn',
         text: '库里正在使用 ' + offN + ' 个非标准标签(不在标准集里)。',
-        action: '这些是别名表的漏洞,以后还会继续产生。跑 <code>scripts/suggest_aliases.py</code> 生成映射。'
+        action: '这些是别名表的漏洞,以后还会继续产生。生成映射,确认无误再 --apply 写库。',
+        cmd: 'python scripts/suggest_aliases.py'
       });
     }
 
@@ -141,7 +153,7 @@
       out.push({
         level: 'warn',
         text: '召回漏检率 ' + pct(rc.fallback_rate) + '(窄化后仍判 UNKNOWN 的比例)。',
-        action: '说明候选集经常没含正确答案。调大 <code>TOPIC_RECALL_TOP_K</code>,或补历史样例让打分更准。'
+        action: '说明候选集经常没含正确答案。调大 <code>TOPIC_RECALL_TOP_K</code>(config/.env),或补历史样例让打分更准。'
       });
     }
 
@@ -149,10 +161,44 @@
       out.push({
         level: 'ok',
         text: '指标都在阈值内:未分类率 ' + pct(rate) + ',标准标签覆盖 ' + pct(sc.rate) + ',gold set ' + num(rv.gold_groups) + ' 组。',
-        action: '保持现在的复核节奏即可 —— gold set 越大,这里的数才越可信。'
+        action: '保持现在的复核节奏即可 —— gold set 越大,这里的数才越可信。',
+        cta: { href: '/review', label: '继续复核' }
       });
     }
     return out;
+  }
+
+  /* 复制命令:优先 Clipboard API,非安全上下文(http)下退回 execCommand。
+     生产可能跑在纯 http 上,那时 navigator.clipboard 直接是 undefined。 */
+  function copyCmd(btn, cmd) {
+    var flash = function (ok) {
+      var old = btn.getAttribute('data-label') || '复制命令';
+      btn.textContent = ok ? '已复制' : '复制失败';
+      btn.classList.toggle('is-copied', ok);
+      setTimeout(function () {
+        btn.textContent = old;
+        btn.classList.remove('is-copied');
+      }, 1600);
+    };
+
+    var fallback = function () {
+      var ta = document.createElement('textarea');
+      ta.value = cmd;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) { flash(true); } else { window.prompt('复制下面的命令:', cmd); }
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(function () { flash(true); }, fallback);
+    } else {
+      fallback();
+    }
   }
 
   function renderVerdict(m) {
@@ -168,6 +214,29 @@
       var act = el('span', 'mt-v__act');
       act.innerHTML = v.action || '';
       txt.appendChild(act);
+
+      // 操作行:跳转按钮 + 命令行
+      if (v.cta || v.cmd) {
+        var ops = el('span', 'mt-v__ops');
+        if (v.cta) {
+          var a = el('a', 'mt-v__btn', v.cta.label);
+          a.href = v.cta.href;
+          // 同页跳转就够了;不带 target=_blank —— 用户处理完会自己回来刷指标
+          a.setAttribute('title', '前往 ' + v.cta.href);
+          ops.appendChild(a);
+        }
+        if (v.cmd) {
+          var btn = el('button', 'mt-v__copy', '复制命令');
+          btn.type = 'button';
+          btn.setAttribute('data-label', '复制命令');
+          btn.setAttribute('title', '在服务器 /opt/feishu_group_message 下执行');
+          btn.addEventListener('click', function () { copyCmd(btn, v.cmd); });
+          ops.appendChild(btn);
+          ops.appendChild(el('code', 'mt-v__cmd', v.cmd));
+        }
+        txt.appendChild(ops);
+      }
+
       box.appendChild(txt);
       wrap.appendChild(box);
     });

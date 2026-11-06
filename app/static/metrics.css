@@ -86,6 +86,76 @@
 .mt-v--info { border-color: rgba(59, 142, 222, .35); background: var(--primary-soft); }
 .mt-v--info .mt-v__ico { background: var(--primary-strong); }
 
+/* 操作行:跳转按钮 + 可复制的命令 */
+.mt-v__ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+.mt-v__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(59, 142, 222, .48);
+  background: var(--primary-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--primary-strong);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background var(--dur), border-color var(--dur), transform .14s;
+}
+.mt-v__btn::after { content: '→'; font-size: 12px; opacity: .8; }
+.mt-v__btn:hover {
+  background: var(--primary-soft-strong);
+  border-color: var(--primary-strong);
+  color: #fff;
+  transform: translateX(1px);
+}
+
+.mt-v__copy {
+  min-height: 30px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur), border-color var(--dur), background var(--dur);
+}
+.mt-v__copy:hover {
+  color: var(--text);
+  border-color: var(--stroke-strong);
+  background: var(--surface-hover);
+}
+.mt-v__copy.is-copied {
+  color: var(--accent-text);
+  border-color: rgba(63, 199, 154, .45);
+  background: var(--accent-soft);
+}
+
+.mt-v__cmd {
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, .28);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 100%;
+}
+
 /* ------------------------------------------------------------ KPI */
 /* 6 个 KPI:桌面 3×2。auto-fit 在 880px 容器里会断成 5+1(最后一张孤零零
    占一行),看着像漏了一个,所以这里写死列数。 */

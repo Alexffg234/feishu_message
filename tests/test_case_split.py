@@ -201,14 +201,30 @@ def _msg(mid, sender, ts, text, parent="", message_type="text"):
 
 
 def _two_problem_group(session):
-    """一个对话里混两个问题,第二个问题隔 3 小时,且回复的是上一问题的消息。"""
-    svc = MessageService(session, allowed_chat_ids=set())
-    svc.save_message(_msg("m1", "u1", T0, "这台电视画面模糊"))
-    svc.save_message(_msg("m2", "u2", T0 + 60_000, "换个片源试试", parent="m1"))
-    svc.save_message(_msg("m3", "u1", T0 + 120_000, "换了还是一样", parent="m2"))
-    # 第二件不相关的事:回复的是上一问题的 m2(跨切点回复边)
-    svc.save_message(_msg("m4", "u3", T0 + 3 * HOUR, "另一台开不了机", parent="m2"))
-    svc.save_message(_msg("m5", "u2", T0 + 3 * HOUR + 60_000, "师傅已上门处理", parent="m4"))
+    """一个对话里混两个问题,第二个问题隔 3 小时,且回复的是上一问题的消息。
+
+    这是**存量畸形对话**:入库护栏(`case_split_gap_seconds`,默认 2h)上线后,
+    新数据回复久无动静的旧组会自成一组,这种混合组再也长不出来。切分脚本的
+    服务对象正是护栏之前已经写进库的历史数据,所以播种时把护栏关掉
+    (`gap=0`)复现旧行为,播完立刻恢复,避免污染同进程内其他测试。
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    old_gap = settings.case_split_gap_seconds
+    settings.case_split_gap_seconds = 0
+    try:
+        svc = MessageService(session, allowed_chat_ids=set())
+        svc.save_message(_msg("m1", "u1", T0, "这台电视画面模糊"))
+        svc.save_message(_msg("m2", "u2", T0 + 60_000, "换个片源试试", parent="m1"))
+        svc.save_message(_msg("m3", "u1", T0 + 120_000, "换了还是一样", parent="m2"))
+        # 第二件不相关的事:回复的是上一问题的 m2(跨切点回复边)
+        svc.save_message(_msg("m4", "u3", T0 + 3 * HOUR, "另一台开不了机", parent="m2"))
+        svc.save_message(
+            _msg("m5", "u2", T0 + 3 * HOUR + 60_000, "师傅已上门处理", parent="m4")
+        )
+    finally:
+        settings.case_split_gap_seconds = old_gap
     conv = session.query(Conversation).filter_by(root_message_id="m1").one()
     # 打上「混合组」的旧标签,模拟归并造成的错标
     for m in session.query(Message).all():

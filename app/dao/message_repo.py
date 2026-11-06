@@ -135,6 +135,23 @@ class MessageRepo:
         )
         return self._session.execute(stmt).first() is not None
 
+    def group_last_create_time(
+        self, chat_id: str, root_message_id: str
+    ) -> int | None:
+        """组内最后一条消息的时间(毫秒 int);空组/时间脏数据返回 None。
+
+        供入库侧护栏判断「这组是不是已经静默很久了」,不加载整组消息。
+        """
+        stmt = select(func.max(Message.create_time)).where(
+            Message.chat_id == chat_id,
+            Message.root_message_id == root_message_id,
+        )
+        val = self._session.execute(stmt).scalar()
+        try:
+            return int(val) if val else None
+        except (TypeError, ValueError):
+            return None
+
     def set_topic_for_group(
         self, chat_id: str, root_message_id: str, topic: str
     ) -> int:

@@ -172,7 +172,12 @@ class MessageService:
             create.chat_id, create.parent_message_id
         )
         if parent is not None:
-            return parent.root_message_id or parent.message_id
+            root = parent.root_message_id or parent.message_id
+            if self._reply_too_late(create, root):
+                # 回复的是久无动静的旧组:新起一组,不把新问题挂进旧对话。
+                # 是否仍属同一案例交给 conv_stitch 软判定(case_id),不物理合并。
+                return create.message_id
+            return root
         # 父消息不在库中:用事件携带的 root_id,否则以被回复消息为分组锚点
         return create.root_message_id or create.parent_message_id
 
@@ -217,6 +222,30 @@ class MessageService:
             if (m.root_message_id or m.message_id) != root:
                 return ""
         return root
+
+    def _reply_too_late(self, create: MessageCreate, root: str) -> bool:
+        """回复的是否是「久无动静的旧组」(超过 case_split_gap_seconds)。
+
+        判据用**整组最后一条消息**的时间,而不是被回复那条的时间:组里刚有人
+        说过话就说明这轮处理还没结束,此时回复旧消息属于延续;整组静默超过
+        阈值,再回复旧消息基本就是新问题。
+
+        时间字段缺失/不可解析时一律返回 False(按旧行为并入旧组):脏数据
+        不该成为「把一条正常追问劈成两个对话」的理由。
+        """
+        from app.core.config import get_settings
+
+        gap = get_settings().case_split_gap_seconds
+        if gap <= 0:
+            return False
+        try:
+            now_ms = int(create.create_time)
+        except (TypeError, ValueError):
+            return False
+        last_ms = self._repo.group_last_create_time(create.chat_id, root)
+        if last_ms is None:
+            return False
+        return (now_ms - last_ms) > gap * 1000
 
     def _save(self, create: MessageCreate) -> bool:
         """落库并防重。返回 True 表示新写入,False 表示重复跳过。"""
@@ -296,12 +325,19 @@ class MessageService:
 
         # 回复消息 → 写回复边(子=当前消息, 父=parent_message_id)
         if msg.parent_message_id:
-            parent_depth = self._convo.get_depth(msg.parent_message_id)
-            depth = parent_depth + 1 if parent_depth >= 0 else 1
-            parent_sender = ""
             parent = self._repo.get_by_message_id(msg.chat_id, msg.parent_message_id)
-            if parent is not None:
-                parent_sender = parent.sender_id
+            parent_sender = parent.sender_id if parent is not None else ""
+            # depth 只有在父消息属于本组时才有意义。父在别组(入库护栏新起一组、
+            # 或历史数据里跨组回复)时按 1 记,否则会把父树里的深度抄过来,
+            # 让本组根消息显示成深度 4 这种无意义的值。
+            parent_in_group = parent is not None and (
+                parent.root_message_id or parent.message_id
+            ) == root
+            if parent_in_group:
+                parent_depth = self._convo.get_depth(msg.parent_message_id)
+                depth = parent_depth + 1 if parent_depth >= 0 else 1
+            else:
+                depth = 1
             self._convo.add_link(
                 conv.id,
                 parent_message_id=msg.parent_message_id,

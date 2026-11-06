@@ -349,6 +349,41 @@ python scripts/merge_conversations.py --ids 317,318,319 --topic 投屏卡顿 --n
 python scripts/move_messages.py --from 143 --to 317 --start "2026-10-26 16:50" --end "2026-10-26 17:20" --topic 投屏卡顿
 ```
 
+### 问题单元切分(一组 = 一个问题)
+
+同标签归并、会话缝合都在**合并**;但当一组里本来就混着几个不同问题时,无论 LLM
+怎么选,单标签必然覆盖不全(审计:85 个回复链组里 39 组跨 2 小时以上,典型的一组
+把 4 天内 4 件不相关的事并在一起,摘要还丢了关键线索)。所以打标签之前先按
+**问题单元**把组切开:**一个对话一个标签**。
+
+切点判据(纯规则、零 LLM):
+
+| 信号 | 条件 | 说明 |
+|---|---|---|
+| 换设备 | `messages.case_key` 两侧都非空且不同 | 最强信号,必切 |
+| 显式块起点 | `messages.block_start=1` | 归并打标时标记的新问题块 |
+| 时间断档 | 相邻消息间隔 > `--gap-hours`(默认 2) | 上一轮求助已结束 |
+
+三条取并集;切出来的片若只有客套句(「好的谢谢」)则并回上一片,图片/视频片不当噪声。
+
+```bash
+# 前置:先回填设备锚点(否则「换设备」这条判据全场失效)
+python scripts/backfill_case_key.py --dry-run
+
+python scripts/split_cases.py --stats                 # 各阈值的切分规模对比(不写库)
+python scripts/split_cases.py --gap-hours 2           # 预览(默认 dry-run)
+python scripts/split_cases.py --gap-hours 2 --apply   # 落库
+python scripts/split_cases.py --gap-hours 2 --apply --relabel   # 落库并立即给新单元归类(需 LLM)
+```
+
+落库后**新单元**的 `topic`/`topic_conf` 清空等重新分类(旧标签是从混合组继承来的),
+`stage` 按新组内文本重算;承接组首那个问题的 `keep` 组保留原标签。切分**不继承**
+`case_id`:问题单元(conversation)是物理边界、一个单元一个标签,案例组(`case_id`)
+是软关联、由缝合/`backfill_case_id` 重新判定——否则切完又被 `case_id` 粘回去。
+
+跨切点的回复边留在父消息所在对话,子消息在两侧都按根渲染(`list_tree` 对「父不在本
+对话」的消息按根处理),不丢消息。
+
 ## 主题分类(LLM)
 
 在回复链分组之上再按「主题」聚合:把讨论同一类问题(如「投屏」「远场语音唤不醒」)的所有问答组聚到一个主题下,形成 **主题 → 回复链组 → 消息** 三层结构。
@@ -395,6 +430,21 @@ GET /health -> {"status":"ok"}
 ```
 
 ## 变更历史
+
+### 2026-11-06
+
+- **`2e87cf2` feat(topic): 问题单元切分——把混了多个问题的对话切成一个问题一个对话**
+  - 新增 `app/services/case_split.py`:确定性切点(换设备 `case_key` 变化 / `block_start` 标记 / 时间断档 > 2h),纯客套片并回上一片、图片片不当噪声;落地复用 `conversation_split.split_conversation`(计划精确覆盖校验、重挂消息、回复边迁移、统计重算),不重写拆库逻辑
+  - 新增 `scripts/split_cases.py`:`--stats` 对比各阈值切分规模、默认 dry-run、`--apply` 落库、`--relabel` 立即重新归类
+  - 落库后新单元 `topic`/`topic_conf` 清空、`stage` 按新组内文本重算,`keep` 组保留原标签;不继承 `case_id`(问题单元与案例组分离成两层)
+  - `app/services/stage.py` 抽出公开 `is_filler_only` 供切分复用客套句判定
+  - 切分后跨切点的回复边留在父消息所在对话,子消息两侧都按根渲染,不丢消息
+- **`f4f2461` 话题分类:闭集判别 + 现象/阶段分维度**
+  - topic 改为**闭集判别**:提示词把标准标签按「大类 > 子类」渲染成清单,LLM 只能在清单里选,选不出输出 `UNKNOWN`;闭集外的标签一律不写库、保留未分类(此前 23 组/100 条标签游离在标准集之外)
+  - LLM 输出改为 JSON `{"topic","confidence"}`,`messages.topic_conf` 存自评置信度,供「高置信自动 / 中置信待复核 / 低置信转人工」分流;旧的纯文本格式仍兼容
+  - 新增与 topic 正交的第二维度 **stage(处理阶段)**:`app/services/stage.py` 纯规则判定 待处理/处理中/已推送/已上门/已解决,把「已推」「上门维修」这类动作词从主题标签剥离;每条消息入库即重算,配 `scripts/backfill_stage.py` 回填存量
+  - 轻量迁移:`messages.stage`/`messages.topic_conf`/`conversations.stage` 三列由 `db.py::_ensure_*` 查缺补列;`/api/summary` 返回 `stage`,总结页头部展示「主题 · x　阶段 · y」
+  - 新增 `tests/test_topic_closed_set.py`(12 项)
 
 ### 2026-10-27
 

@@ -101,6 +101,11 @@ class Message(Base):
     # 归类置信度(0~1):LLM 自评把握度;0=未提供(旧格式/未归类)。
     # 供「高置信自动、中置信待复核、低置信转人工」分流使用。
     topic_conf: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # 标签来源:"llm"=模型判别,"human"=人工复核确认(gold set),空=未标记/存量。
+    # 用来回答「这条标签可不可信」:人工确认过的组不再进复核队列,也是评估基线。
+    topic_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="", index=True
+    )
     # 处理阶段(与 topic 正交):topic 描述「是什么现象」,stage 描述「处理到哪一步」。
     # 取值见 app.services.stage,空=未判定。把「已推/已上门」这类动作词从标签体系剥离。
     stage: Mapped[str] = mapped_column(String(32), nullable=False, default="", index=True)

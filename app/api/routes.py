@@ -489,9 +489,14 @@ def api_topic_aliases_upsert(
     db: Session = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> dict:
-    """新建/更新一条别名收敛(同名 upsert)。alias/canonical 均做标签清洗。"""
+    """新建/更新一条别名收敛(同名 upsert)。alias/canonical 均做标签清洗。
+
+    **拒绝把标准标签设为 alias**:那等于宣告该标准标签作废,以后所有它的输出
+    都会被改写成另一个标签——一次手滑毒化整个标签体系,比拒绝麻烦得多。
+    """
     from app.models.topic_alias import TopicAlias
     from app.services.label_norm import clean_label
+    from app.services.topic_service import get_standard_labels
 
     alias = clean_label(body.alias)
     canonical = clean_label(body.canonical)
@@ -499,6 +504,11 @@ def api_topic_aliases_upsert(
         raise HTTPException(status_code=400, detail="alias 与 canonical 均不能为空(语气词无效)")
     if alias == canonical:
         raise HTTPException(status_code=400, detail="alias 与 canonical 不能相同")
+    if alias in set(get_standard_labels(db)):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{alias!r} 是标准标签,不能作为别名(会让该标签失效)",
+        )
     row = db.query(TopicAlias).filter(TopicAlias.alias == alias).first()
     if row is None:
         row = TopicAlias(alias=alias, canonical=canonical, auto=0)
@@ -528,6 +538,69 @@ def api_topic_aliases_delete(
     return {"deleted": alias}
 
 
+# ---------------------------------------------------------------- 人工复核闭环
+@router.get("/api/review/queue")
+def api_review_queue(
+    chat_id: str | None = None,
+    limit: int = 100,
+    low_conf: float = 0.5,
+    db: Session = Depends(get_session),
+) -> dict:
+    """待人工复核队列:未分类组 + 低置信组(未分类优先),附样本文本。
+
+    这是「未分类静默堆积」唯一的出口——队列长度不降,说明要么闭集缺类,
+    要么提示词/召回还不到位。
+    """
+    from app.services.topic_review import list_review_queue
+
+    return list_review_queue(db, chat_id=chat_id, limit=limit, low_conf=low_conf)
+
+
+class ReviewApplyIn(BaseModel):
+    """人工定标入参:把某组确认到某个标准标签。"""
+
+    chat_id: str
+    root_message_id: str
+    label: str
+    allow_new: bool = False
+    propagate: bool = False
+
+
+@router.post("/api/review/apply")
+def api_review_apply(
+    body: ReviewApplyIn,
+    db: Session = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict:
+    """人工确认一组的标签:回写库(置 source=human,conf=1.0)+ 反哺别名表。
+
+    标签收敛不到标准集时返回 400 且不改库(人工也可能手滑写错字)。
+    """
+    from app.services.topic_review import apply_review
+
+    result = apply_review(
+        db,
+        body.chat_id,
+        body.root_message_id,
+        body.label,
+        allow_new=body.allow_new,
+        propagate=body.propagate,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["reason"])
+    return result
+
+
+@router.get("/api/review/gold")
+def api_review_gold(
+    chat_id: str | None = None, db: Session = Depends(get_session)
+) -> dict:
+    """gold set 规模与标签分布(人工确认过的组)。"""
+    from app.services.topic_review import gold_stats
+
+    return gold_stats(db, chat_id=chat_id)
+
+
 # ---------------------------------------------------------------- 指标埋点(阶段四 P2)
 @router.get("/api/topic_metrics")
 def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
@@ -549,12 +622,16 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     - recall: 候选召回命中情况(进程内累计)——narrow_rate 是「被判窄化」的调用占比,
       fallback_rate 是「窄化后仍判 UNKNOWN 用全集重问」的占比,**这个值就是召回的
       漏检率**,持续偏高说明召回打分需要调(top_k 调大或换样例)
+    - review: 人工复核闭环——pending 是待复核组数(未分类 + 低置信),gold_groups 是
+      人工确认过的组数。pending 不降说明缺类/提示词不到位;**gold_groups=0 时上面
+      所有准确率指标都只是模型自说自话**,没有任何基准可比
     """
     from sqlalchemy import case, func
 
     from app.services.conv_stitch import get_stitch_counts
     from app.services.label_norm import get_norm_stats
     from app.services.topic_recall import get_stats as get_recall_stats
+    from app.services.topic_review import gold_stats, list_review_queue
     from app.services.topic_service import get_standard_labels
 
     # ---- 标签分布:每 (chat_id, topic) 的分组数(组=distinct root_message_id) ----
@@ -630,6 +707,10 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     used_labels = {t for (_c, t) in ct_groups}
     covered = len(standards & used_labels)
 
+    # ---- 人工复核闭环(review_queue 只取 1 条探针,total 是聚合计数) ----
+    queue = list_review_queue(db, limit=1)
+    gold = gold_stats(db)
+
     return {
         "topic_count": int(topic_count),
         "low_frequency_topic_count": int(low_freq),
@@ -661,6 +742,14 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
         },
         "confidence": conf_buckets,
         "recall": get_recall_stats(),
+        "review": {
+            "pending_groups": queue["total"],
+            "pending_unclassified": unclassified_groups,
+            "low_conf_threshold": 0.5,
+            "gold_groups": gold["gold_groups"],
+            "human_rate": gold["human_rate"],
+            "gold_labels_top": dict(list(gold["labels"].items())[:10]),
+        },
         "false_merge_sample": {
             "status": "needs_manual_review",
             "sample_size": 0,

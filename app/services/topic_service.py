@@ -376,6 +376,68 @@ class TopicService:
             with self._lock:
                 self._pending.discard(key)
 
+    def _decide_label(
+        self, session, repo: MessageRepo, rows: list, chat_id: str
+    ) -> tuple[str, float, set[str]]:
+        """判别一组的标签:**只算不写库**,返回 (归一化标签, 置信度, 标准集)。
+
+        抽出来的原因是「人工复核的 gold set 评估必须与线上判别走同一条路」——
+        如果评估脚本另写一份提示词构造,量出来的准确率就不是线上的准确率。
+        `predict_group` 直接复用这里。
+        """
+        current_text = " ".join(
+            (m.text or "").strip() for m in rows if (m.text or "").strip()
+        )
+        samples = self._existing_topic_samples(repo, chat_id, current_text=current_text)
+        standards = get_standard_labels(session)
+        standards_set = set(standards)
+        tree = get_standard_tree(session)
+        first_id = min(m.id for m in rows)
+        context = repo.list_recent_before(chat_id, first_id, limit=6)
+        candidates, cand_tree = self._recall_candidates(
+            repo, current_text, standards, tree
+        )
+        # 未窄化时候选子树为 None,要用完整树——否则提示词会从
+        # 「大类 > 子类」层级退化成平铺列表,丢掉大类语境
+        spec_tree = tree if cand_tree is None else cand_tree
+        label, conf = self._llm_decide(rows, samples, context, candidates, spec_tree)
+        if cand_tree is not None and _is_unknown(label):
+            # 召回可能把正确标签漏在候选之外:LLM 说「一个都不像」时
+            # 用全集再问一次。只有窄化过才值得重问(否则是同一道题)。
+            note_fallback()
+            logger.info(
+                "召回候选未命中 %s/%s,改用全集重问", chat_id, rows[0].root_message_id
+            )
+            label, conf = self._llm_decide(rows, samples, context, standards, tree)
+        if not label:
+            return "", conf, standards_set
+        # 标签归一化:别名收敛 -> 标准标签原样 -> (可选)相似度兜底。
+        # 收敛后同义标签写入同一 canonical,归组(canonical 相等)才能归到一起。
+        label = normalize_label(
+            session,
+            label,
+            standards=standards,
+            known_labels=[t for t, _s in samples],
+            sim_threshold=get_settings().topic_alias_sim_threshold,
+        )
+        return label, conf, standards_set
+
+    def predict_group(self, chat_id: str, root_message_id: str) -> tuple[str, float]:
+        """只判别不写库(gold set 评估 / 线上抽样比对用)。失败抛 LLMError。"""
+        if not self.enabled:
+            raise LLMError("LLM 未配置,无法判别")
+        with self._session_factory() as session:
+            repo = MessageRepo(session)
+            rows = repo.list_by_root(root_message_id, chat_id)
+            if not rows or not any((m.text or "").strip() for m in rows):
+                return "", 0.0
+            label, conf, standards_set = self._decide_label(
+                session, repo, rows, chat_id
+            )
+            if standards_set and label not in standards_set:
+                return "", conf  # 闭集外的预测按「未归类」计
+            return label, conf
+
     def classify_group(
         self, chat_id: str, root_message_id: str, merge: bool = True
     ) -> str:
@@ -407,46 +469,8 @@ class TopicService:
                 label = existing_topic
                 to_merge = existing_topic if merge else ""
             else:
-                current_text = " ".join(
-                    (m.text or "").strip() for m in rows if (m.text or "").strip()
-                )
-                samples = self._existing_topic_samples(
-                    repo, chat_id, current_text=current_text
-                )
-                standards = get_standard_labels(session)
-                standards_set = set(standards)
-                tree = get_standard_tree(session)
-                first_id = min(m.id for m in rows)
-                context = repo.list_recent_before(chat_id, first_id, limit=6)
-                candidates, cand_tree = self._recall_candidates(
-                    repo, current_text, standards, tree
-                )
-                # 未窄化时候选子树为 None,要用完整树——否则提示词会从
-                # 「大类 > 子类」层级退化成平铺列表,丢掉大类语境
-                spec_tree = tree if cand_tree is None else cand_tree
-                label, conf = self._llm_decide(
-                    rows, samples, context, candidates, spec_tree
-                )
-                if cand_tree is not None and _is_unknown(label):
-                    # 召回可能把正确标签漏在候选之外:LLM 说「一个都不像」时
-                    # 用全集再问一次。只有窄化过才值得重问(否则是同一道题)。
-                    note_fallback()
-                    logger.info(
-                        "召回候选未命中 %s/%s,改用全集重问", chat_id, root_message_id
-                    )
-                    label, conf = self._llm_decide(
-                        rows, samples, context, standards, tree
-                    )
-                if not label:
-                    raise LLMError("LLM 返回空标签")
-                # 标签归一化:别名收敛 -> 标准标签原样 -> (可选)相似度兜底。
-                # 收敛后同义标签写入同一 canonical,归组(canonical 相等)才能归到一起。
-                label = normalize_label(
-                    session,
-                    label,
-                    standards=standards,
-                    known_labels=[t for t, _s in samples],
-                    sim_threshold=get_settings().topic_alias_sim_threshold,
+                label, conf, standards_set = self._decide_label(
+                    session, repo, rows, chat_id
                 )
                 if not label:
                     raise LLMError("LLM 标签归一化后为空")
@@ -464,7 +488,9 @@ class TopicService:
                     self._sync_stage(repo, session, chat_id, root_message_id, rows)
                     session.commit()
                     return ""
-                repo.set_topic_for_group(chat_id, root_message_id, label)
+                repo.set_topic_for_group(
+                    chat_id, root_message_id, label, source="llm"
+                )
                 repo.set_topic_conf_for_group(chat_id, root_message_id, conf)
                 # conversations.topic 此前无人写入(页面读到恒为空),随分类同步
                 ConversationRepo(session).set_topic(chat_id, root_message_id, label)

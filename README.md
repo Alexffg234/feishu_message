@@ -494,6 +494,48 @@ python scripts/backfill_group_topic.py
 | `standard_coverage.rate` / `unused_standards` | 标准标签被用到的比例 / 从没被用到的标准 | `unused_standards` 长期偏多 = 标准集有冗余项,或闭集缺别名映射 |
 | `confidence` | 已归类组的置信度分档(高≥0.8 / 中 / 低 / 无) | 中低档即人工复核队列 |
 | `low_frequency_ratio` | 只用过 1 次的标签占比 | 衡量同义分裂是否被收敛 |
+| `review.pending_groups` | 待人工复核组数(未分类 + 低置信) | 不降 = 闭集缺类或提示词不到位 |
+| `review.gold_groups` | 人工确认过的组数(gold set) | **为 0 时上面所有准确率都只是模型自说自话** |
+
+### 人工复核闭环(gold set)
+
+闭集、召回、相似度兜底都只能把「模型判得对的」判对。剩下判不对的必须有人看一遍,
+而且看一遍的价值要能沉淀,否则同一类错会一直错下去。沉淀路径:
+
+```
+人工把一组的标签改对
+  -> 回写 messages/conversations(置 topic_source='human',置信度 1.0)
+  -> 原标签是系统自造的非标准标签时,写进 topic_aliases(以后自动收敛)
+  -> 该组进入 gold set -> 用它评准确率 -> 再调提示词/召回
+```
+
+```bash
+python scripts/topic_review.py                          # 队列(未分类优先),带样本文本
+python scripts/topic_review.py --export review.csv      # 导出:填好 label 列再倒回
+python scripts/topic_review.py --csv review.csv         # 预览(不写库)
+python scripts/topic_review.py --csv review.csv --apply # 执行
+python scripts/topic_review.py --chat oc_xxx --group <root> --label 屏幕闪烁 --apply --propagate
+python scripts/topic_review.py --gold                   # gold set 规模/标签分布
+python scripts/topic_review.py --gold --eval            # 重跑判别算 top-1 准确率(需 LLM)
+```
+
+入队口径:整组无标签(未分类)**或**组内最大 `topic_conf < 0.5`(低置信);
+`topic_source='human'` 的组不再进队列,否则人工审过的会被反复塞回。
+
+两条硬护栏(踩过就知道多重要):
+
+- **原标签是标准标签时绝不写别名**。把「屏幕闪烁」映射成「画面模糊类问题」会让
+  以后所有「屏幕闪烁」都被改写——一次手滑毒化整个标签体系。同一护栏也加在了
+  `POST /api/topic_aliases` 上,那是这个 bug 的第二个入口。
+- **标签必须能收敛到标准集才落库**(除非 `--allow-new`)。人工也会手滑写错字,
+  不能因为一次手滑就在库里造一个新标签;被拒时库原样不动。
+
+`--propagate` 把库里其它同错标签的组一并回刷(默认关)。回刷只改 `topic`,
+不动 `topic_source`/`topic_conf`——那些组既不是模型判的也不是人逐条看的,
+不该算进 gold set。
+
+评估准确率必须走与线上**同一条**判别路径(`predict_group` 复用
+`_decide_label`),否则量出来的不是线上的准确率。
 
 ## 鉴权提示
 
@@ -526,6 +568,14 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **人工复核闭环:低置信队列 -> 人工定标 -> 反哺别名 -> gold set**
+  - 新增 `app/services/topic_review.py`:`list_review_queue`(未分类 + 低置信,未分类优先)、`apply_review`(回写三处 + 学别名 + 可选回刷)、`gold_stats` / `eval_gold`
+  - 新增 `messages.topic_source`(`llm`/`human`),轻量迁移 `_ensure_stage_columns` 一并加列;人工确认的组不再进队列,并作为准确率评估基线
+  - **两条硬护栏**:原标签是标准标签时绝不写别名(否则连锁改写整个标签体系);标签收敛不到标准集时拒绝且不改库(`--allow-new` 才放行)。`POST /api/topic_aliases` 同样加了标准标签判断——那是同一个 bug 的第二个入口
+  - `TopicService` 抽出 `_decide_label`(只算不写库)+ 新增 `predict_group`:`--gold --eval` 与线上判别走同一条路径,否则量出来的不是线上的准确率
+  - 新增 `scripts/topic_review.py`(队列/导出 csv/批量定标/预览 dry-run/gold 评估)与 `GET /api/review/queue`、`POST /api/review/apply`、`GET /api/review/gold`
+  - `/api/topic_metrics` 新增 `review`(pending_groups / gold_groups / human_rate)
+  - 新增 `tests/test_topic_review.py`(22 项)
 - **候选召回:把「41 选 1」缩成「8 选 1」**
   - 新增 `app/services/topic_recall.py`:纯字面召回,三路打分取最大——精确命中(1.0)/ 覆盖度(标签 2-gram 被文本覆盖的比例,长文本下 Dice 会被稀释到接近 0 所以不能用)/ 历史样例 Dice × 0.9
   - 覆盖度会剥掉标签尾部的「类问题」这类空后缀(「画面模糊类问题」7 字里 3 字是后缀,不剥只得 0.33,剥掉 0.67)

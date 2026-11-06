@@ -268,7 +268,8 @@ def _ensure_stage_columns() -> None:
 
     - messages.stage / conversations.stage:待处理/处理中/已推送/已上门/已解决
     - messages.topic_conf:LLM 自评置信度(0~1),0=未提供
-    两列均与 topic 正交,存量数据默认空/0,不改变旧代码语义。
+    - messages.topic_source:标签来源(llm/human),空=未标记
+    三者均与 topic 正交,存量数据默认空/0,不改变旧代码语义。
     新建表上 create_all 已含这些列,这里只处理存量库。
     """
     from sqlalchemy import inspect as sa_inspect
@@ -279,6 +280,7 @@ def _ensure_stage_columns() -> None:
     for table, col, ddl in (
         ("messages", "stage", "VARCHAR(32) NOT NULL DEFAULT ''"),
         ("messages", "topic_conf", "FLOAT NOT NULL DEFAULT 0"),
+        ("messages", "topic_source", "VARCHAR(16) NOT NULL DEFAULT ''"),
         ("conversations", "stage", "VARCHAR(32) NOT NULL DEFAULT ''"),
     ):
         if table not in tables:

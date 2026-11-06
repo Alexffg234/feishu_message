@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.message import Message
@@ -153,18 +153,25 @@ class MessageRepo:
             return None
 
     def set_topic_for_group(
-        self, chat_id: str, root_message_id: str, topic: str
+        self, chat_id: str, root_message_id: str, topic: str, source: str | None = None
     ) -> int:
-        """整组(同一回复链)统一打 topic 标签,返回影响行数。"""
+        """整组(同一回复链)统一打 topic 标签,返回影响行数。
+
+        source 传值时同写 topic_source("llm"/"human"),None 表示不动来源——
+        LLM 重分类不该把人工确认过的标记洗掉,所以调用方按场景显式传。
+        """
         from sqlalchemy import update
 
+        values: dict = {"topic": topic}
+        if source is not None:
+            values["topic_source"] = source
         stmt = (
             update(Message)
             .where(
                 Message.chat_id == chat_id,
                 Message.root_message_id == root_message_id,
             )
-            .values(topic=topic)
+            .values(**values)
         )
         return self._session.execute(stmt).rowcount or 0
 
@@ -290,6 +297,159 @@ class MessageRepo:
                 "message_count": int(r[2] or 0),
                 "first_message_id": int(r[3] or 0),
                 "start_time": r[4] or "",
+            }
+            for r in self._session.execute(stmt).all()
+        ]
+
+    def list_review_roots(
+        self,
+        chat_id: str | None = None,
+        limit: int = 100,
+        low_conf: float = 0.5,
+        include_human: bool = False,
+    ) -> list[dict]:
+        """人工复核队列:未分类组 + 低置信组,未分类优先、组内越新越靠前。
+
+        一个「组」= 一条回复链(chat_id + root_message_id)。入队条件取并集:
+        - 未分类:整组无 topic(闭集拒掉的都在这儿,不盯就静默堆积);
+        - 低置信:整组最大 topic_conf < low_conf(LLM 自己都没把握)。
+        include_human=False 时排除人工已确认的组(topic_source='human'),
+        否则人工审过的会被反复塞回队列。
+
+        跨库可移植:不用 group_concat / || 拼接,只用 max/count/min 聚合。
+        返回 [{"chat_id","root_message_id","topic","topic_conf","labeled",
+                "message_count","last_time","first_message_id"}]。
+        """
+        labeled = func.max(case((Message.topic != "", 1), else_=0)).label("labeled")
+        # topic 组内本应一致,max(空串被非空值取代)= 取到那个标签
+        topic = func.max(Message.topic).label("topic")
+        conf = func.max(Message.topic_conf).label("conf")
+        human = func.max(case((Message.topic_source == "human", 1), else_=0)).label(
+            "human"
+        )
+        first_id = func.min(Message.id).label("first_id")
+        stmt = (
+            select(
+                Message.chat_id,
+                Message.root_message_id,
+                topic,
+                conf,
+                labeled,
+                human,
+                func.count(Message.id).label("n"),
+                func.max(Message.create_time).label("last"),
+                first_id,
+            )
+            .where(Message.root_message_id != "")
+            .group_by(Message.chat_id, Message.root_message_id)
+            .having(or_(labeled == 0, conf < low_conf))
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        if not include_human:
+            stmt = stmt.having(human == 0)
+        # 未分类优先(问题更大),再按最后活跃时间倒序(新的先处理)
+        stmt = stmt.order_by(labeled.asc(), first_id.desc()).limit(limit)
+        return [
+            {
+                "chat_id": r[0],
+                "root_message_id": r[1],
+                "topic": r[2] or "",
+                "topic_conf": float(r[3] or 0.0),
+                "labeled": int(r[4] or 0),
+                "message_count": int(r[6] or 0),
+                "last_time": r[7] or "",
+                "first_message_id": int(r[8] or 0),
+            }
+            for r in self._session.execute(stmt).all()
+        ]
+
+    def count_review_roots(
+        self,
+        chat_id: str | None = None,
+        low_conf: float = 0.5,
+        include_human: bool = False,
+    ) -> int:
+        """复核队列总长度(不受 limit 截断)。"""
+        labeled = func.max(case((Message.topic != "", 1), else_=0)).label("labeled")
+        conf = func.max(Message.topic_conf).label("conf")
+        human = func.max(case((Message.topic_source == "human", 1), else_=0)).label(
+            "human"
+        )
+        sub = select(Message.chat_id, Message.root_message_id).where(
+            Message.root_message_id != ""
+        )
+        if chat_id:
+            sub = sub.where(Message.chat_id == chat_id)
+        sub = sub.group_by(Message.chat_id, Message.root_message_id).having(
+            or_(labeled == 0, conf < low_conf)
+        )
+        if not include_human:
+            sub = sub.having(human == 0)
+        sub = sub.subquery()
+        return int(
+            self._session.execute(select(func.count()).select_from(sub)).scalar() or 0
+        )
+
+    def get_group_samples(
+        self, chat_id: str, roots: list[str], per_group: int = 2, max_len: int = 120
+    ) -> dict[str, list[str]]:
+        """一批组的样本文本(每组最早 per_group 条非空文本),供人工看内容判断。
+
+        单次查询取回这批组的全部文本再在内存截断:组数受 limit 控制(默认 100),
+        消息量可控;避免 group_concat(GROUP_CONCAT/string_agg 各家语法不同)。
+        """
+        if not roots:
+            return {}
+        stmt = (
+            select(Message.root_message_id, Message.text)
+            .where(
+                Message.chat_id == chat_id,
+                Message.root_message_id.in_(roots),
+                Message.text != "",
+            )
+            .order_by(Message.id.asc())
+        )
+        out: dict[str, list[str]] = {}
+        for root, text in self._session.execute(stmt):
+            bucket = out.setdefault(root, [])
+            if len(bucket) >= per_group:
+                continue
+            t = (text or "").strip()
+            if t:
+                bucket.append(t[:max_len])
+        return out
+
+    def list_gold_roots(
+        self, chat_id: str | None = None, limit: int = 1000
+    ) -> list[dict]:
+        """人工确认过的组(gold set):评估判别准确率的唯一可信基线。
+
+        返回 [{"chat_id","root_message_id","label","message_count"}]。
+        """
+        human = func.max(case((Message.topic_source == "human", 1), else_=0)).label(
+            "human"
+        )
+        stmt = (
+            select(
+                Message.chat_id,
+                Message.root_message_id,
+                func.max(Message.topic).label("label"),
+                func.count(Message.id).label("n"),
+            )
+            .where(Message.root_message_id != "")
+            .group_by(Message.chat_id, Message.root_message_id)
+            .having(human == 1)
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        stmt = stmt.order_by(func.min(Message.id).desc()).limit(limit)
+        return [
+            {
+                "chat_id": r[0],
+                "root_message_id": r[1],
+                "label": r[2] or "",
+                "message_count": int(r[3] or 0),
             }
             for r in self._session.execute(stmt).all()
         ]

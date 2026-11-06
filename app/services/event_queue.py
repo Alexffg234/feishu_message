@@ -54,6 +54,9 @@ class _ClaimedRow:
 _EMPTY_WAIT = 0.2
 # 单次消费后刷新退避重试的阻塞窗口(H6:避免重试饥饿)
 _FLUSH_WAIT = 0.05
+# outbox 消费循环撞上瞬时 DB 异常后的重试间隔(秒)。不能直接 continue:
+# DB 长时间不可用时会退化成高频空转 + 刷日志。
+_CONSUMER_ERROR_BACKOFF = 0.5
 
 
 def _extract_event_id(item: Any) -> str | None:
@@ -312,17 +315,29 @@ class EventQueue:
 
         retrying 到期时间落在表里,按 retry_at_ms 定时可取,天然不存在
         内存模式的饥饿问题;H6 因此自动满足。
+
+        整个循环体必须有异常护栏:一行瞬时 DB 异常(死锁 1213 / 锁等待超时
+        1205 / 连接被服务端掐断 / 主从切换)会让**消费者线程直接死掉**,队列
+        从此永久停摆,而现场只剩 threading 打的一行 stderr——监控上看不出
+        「队列停了」,比丢一条消息严重得多。认领 / 标记失败都靠租约与重试自愈,
+        所以吞掉异常继续跑是对的;退避是为了别在 DB 长时间不可用时空转刷日志。
         """
         while not self._stopping:
-            # 先排空降级期间进入内存队列的事件(DB 不可用时的尽力而为)
-            self._drain_memory()
-            row = self._claim_next()
-            if row is None:
-                if self._stopping:
-                    break
-                time.sleep(_EMPTY_WAIT)
-                continue
-            self._process_outbox(row)
+            try:
+                # 先排空降级期间进入内存队列的事件(DB 不可用时的尽力而为)
+                self._drain_memory()
+                row = self._claim_next()
+                if row is None:
+                    if self._stopping:
+                        break
+                    time.sleep(_EMPTY_WAIT)
+                    continue
+                self._process_outbox(row)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "outbox 消费循环异常,%.1fs 后继续", _CONSUMER_ERROR_BACKOFF
+                )
+                time.sleep(_CONSUMER_ERROR_BACKOFF)
 
     def _drain_memory(self) -> bool:
         """尽力处理内存队列中的事件(降级产物)。返回是否处理过。"""

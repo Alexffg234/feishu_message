@@ -267,6 +267,31 @@ python scripts/query_messages.py --reclassify    # 对未分类的组重新调 L
 python scripts/query_messages.py --json export.json   # 导出为JSON
 ```
 
+## 事件队列(at-least-once)
+
+飞书回调必须**先应答后处理**(超时重推会抖)。`EventQueue` 因此把事件先原子写进
+`event_outbox`(唯一键 `event_key` 幂等,重推自动吞并),再让消费线程按行认领处理:
+
+| 环节 | 机制 |
+|---|---|
+| 认领 | `UPDATE ... WHERE status IN (pending, retrying, processing) AND retry_at_ms <= now`,乐观守卫抢锁,多 worker 只有一个能抢到 |
+| 处理租约 | 认领即把 `retry_at_ms` 推到 `now + 60s`;worker 崩溃后行停在该状态,租约到期自动被回收重处理 |
+| 重试 | 失败写 `status=retrying` + 退避到期时间(默认 5s / 30s / 120s),到期后被重新认领 |
+| 重试耗尽 | 标 `failed` 并追加 `data/dead_events.jsonl` 死信,`/healthz` 会报行数 |
+
+**消费循环的整体异常护栏**(`_run_persistent` 的 try/except)不是防御性代码,是必需项:
+一行瞬时 DB 异常(死锁 1213 / 锁等待超时 1205 / 连接被服务端掐断 / 主从切换)原来会
+直接从 `_claim_next` 冒出去**终结消费线程**,队列从此永久停摆,而现场只剩 threading 打的
+一行 stderr——监控上看不出「队列停了」,比丢一条消息严重得多。现在捕获后退避 0.5s 继续,
+认领/标记失败都靠租约 + 重试自愈。
+
+> 测试里持久化模式必须用**文件型 SQLite**(每次 session 独占连接)。用
+> `sqlite://` + `StaticPool` 会让消费者线程和测试线程共用同一条连接,测试线程每关一次
+> session 就把消费者正在写的事务 rollback 掉,制造三种生产上不存在的假故障:
+> `cannot commit - no transaction is active`、commit 静默变空操作(行卡在 processing
+> 等租约)、或异常冒到 `_claim_next` 打死线程。这个坑曾让
+> `test_persistent_retry_then_success` 偶发失败约 10%。
+
 ## 消息分组(回复链)
 
 按「回复链」把消息归组:**A 发一条消息,B 回复 A(或 C 再回复 B),归为同一组**。
@@ -693,6 +718,11 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **事件队列:消费循环加异常护栏 + 修掉测试环境的假故障**
+  - `_run_persistent` 原来没有异常护栏:一行瞬时 DB 异常(死锁 1213 / 锁等待超时 1205 / 连接被掐 / 主从切换)从 `_claim_next` 冒出去就**终结消费线程**,队列永久停摆,现场只剩 threading 打的一行 stderr——监控上看不出「队列停了」。现在捕获后退避 0.5s 继续,认领/标记失败靠租约 + 重试自愈;新增 `_CONSUMER_ERROR_BACKOFF`
+  - 偶发失败的 `test_persistent_retry_then_success` 根因**不在被测代码**:测试用 `sqlite://` + `StaticPool`,消费者线程与测试线程**共用一条连接**,测试线程每关一次 session 就把消费者正在写的事务 rollback 掉。压测 40 轮 dump 出三种症状——`cannot commit - no transaction is active`(提交报错)、commit 静默变空操作(行卡在 `processing`,`retry_at` 还剩 52s,等租约 60s)、异常冒到 `_claim_next` 打死线程。改为**文件型 SQLite**(每次 session 独占连接,唯一文件名保证用例隔离)
+  - 新增 `test_persistent_consumer_survives_transient_db_error`:模拟 `_claim_next` 抛一次 `OperationalError`,断言消费者线程存活且后续事件仍被处理
+  - 验证:`tests/test_event_queue.py` 连跑 25 轮 0 失败(改前 3/25 失败)
 - **改造前后对比快照:把「预期代价」和「退化」分开**
   - 新增 `scripts/metrics_snapshot.py`:`--save <LABEL>` 抓快照(JSON,`schema=1`)、`--diff BEFORE AFTER` 出对比、`--list`
   - **「前」快照由 `slim_topics.py --apply` 自动抓**(写库前抓 before、commit 后抓 after 并打印对比):写库之后 `messages.topic` 已改写,「前」状态在库里不复存在,重算需整库回滚——这是唯一窗口,不能指望人记得先跑;抓失败不阻断写库但必须当场报出来

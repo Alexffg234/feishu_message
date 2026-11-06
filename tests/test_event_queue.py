@@ -9,13 +9,18 @@ outbox 持久化模式:submit 先落库、消费后标 done、重复 key 幂等�
 """
 import json
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services.event_queue import EventQueue
+
+# 持久化模式的临时库目录,进程退出自动清理
+_TMP_DIR = tempfile.TemporaryDirectory(prefix="feishu-eq-")
 
 
 def _wait(cond, timeout: float = 8.0) -> bool:
@@ -50,17 +55,23 @@ def _make_event() -> "P2ImMessageReceiveV1":
 
 
 def _make_session_factory():
+    """每次调用一个独立的**文件型** SQLite,每次 session 独占一条连接。
+
+    不能用 `sqlite://` + StaticPool:那会让消费者线程和测试线程**共用同一条
+    连接**,测试线程每关一次 session 就把消费者正在写的事务 rollback 掉。症状
+    有三种,全是假故障:`cannot commit - no transaction is active`(提交报错)、
+    commit 静默变空操作(行卡在 processing 等租约过期 60s)、或异常冒到
+    `_claim_next` 把消费者线程打死。生产用 MySQL 连接池,每个 session 独占连接,
+    这些都不会发生——测试环境自己造出来的故障只会掩盖真问题。
+    文件型 + 唯一文件名同时保证用例之间互相隔离。
+    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
 
     from app.models import Base, EventOutbox
 
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    db = Path(_TMP_DIR.name) / f"outbox_{uuid.uuid4().hex[:8]}.db"
+    engine = create_engine(f"sqlite:///{db}")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     return Session, EventOutbox
@@ -308,6 +319,46 @@ def test_persistent_retry_then_success():
     row = _outbox_rows(Session)[0]
     assert row.status == "done"
     assert row.attempt == 2  # 失败 2 次(retrying 2 次)后第 3 次成功
+
+
+def test_persistent_consumer_survives_transient_db_error(monkeypatch, caplog):
+    """一次瞬时 DB 异常不得打死消费者线程。
+
+    生产上这类异常是常态:死锁(1213)、锁等待超时(1205)、连接被服务端掐断、
+    主从切换。原来 `_run_persistent` 没有护栏,异常直接从 `_claim_next` 冒出去终结
+    线程,队列**永久停摆**,现场只剩 threading 打的一行 stderr——监控上看不出
+    「队列停了」,比丢一条消息严重得多。护栏之后靠租约 + 重试自愈。
+    """
+    import logging
+
+    from sqlalchemy.exc import OperationalError
+
+    Session, _ = _make_session_factory()
+    got: list = []
+    q = EventQueue(process_fn=lambda x: got.append(x), session_factory=Session)
+
+    real_claim = q._claim_next
+    calls = {"n": 0}
+
+    def flaky_claim():
+        if calls["n"] == 0:
+            calls["n"] += 1
+            raise OperationalError("SELECT 1", {}, Exception("deadlock"))
+        return real_claim()
+
+    monkeypatch.setattr(q, "_claim_next", flaky_claim)
+    caplog.set_level(logging.ERROR, logger="app.services.event_queue")
+
+    q.start()
+    try:
+        assert q.submit(_make_event())
+        assert _wait(lambda: got, timeout=5), "瞬时异常之后事件再也没被处理:消费者线程死了"
+        assert q._thread is not None and q._thread.is_alive()
+    finally:
+        q.stop()
+
+    assert calls["n"] == 1
+    assert "消费循环异常" in caplog.text
 
 
 def test_persistent_survives_restart():

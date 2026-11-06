@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -98,6 +98,12 @@ class Message(Base):
     block_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # LLM 主题标签(如"投屏"、"远场语音唤不醒");空=未分类。组内共享同一标签
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
+    # 归类置信度(0~1):LLM 自评把握度;0=未提供(旧格式/未归类)。
+    # 供「高置信自动、中置信待复核、低置信转人工」分流使用。
+    topic_conf: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # 处理阶段(与 topic 正交):topic 描述「是什么现象」,stage 描述「处理到哪一步」。
+    # 取值见 app.services.stage,空=未判定。把「已推/已上门」这类动作词从标签体系剥离。
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="", index=True)
     # 设备标识锚点(阶段二):从消息文本抽取的 UUID/SN/MAC/IP,用于「同一故障案例」确定性归并。
     # 空=未识别。归并/缝合时 case_key 相等(且非空)即视为同一案例,不依赖 LLM。
     case_key: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)

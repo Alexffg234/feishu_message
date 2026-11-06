@@ -892,6 +892,8 @@ def api_summary(
         "chat_id": conv.chat_id,
         "root_message_id": conv.root_message_id,
         "topic": conv.topic or summary.get("topic", ""),
+        # 处理阶段(与主题正交):待处理/处理中/已推送/已上门/已解决;空=未判定
+        "stage": conv.stage or "",
         "enabled": summary.get("enabled", False),
         "summary": summary.get("summary", ""),
         "tree": tree["roots"],

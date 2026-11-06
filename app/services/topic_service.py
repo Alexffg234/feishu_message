@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,20 +39,19 @@ from app.services.llm import LLMClient, LLMError
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
-    "你是群聊消息主题分类器。请把下面这段对话归纳为一个简短主题标签。\n"
+    "你是群聊问题分类器。请把下面这段对话判定到「一个」既有的问题标签上。\n"
     "要求:\n"
-    "1. 优先沿用标准标签:「标准标签列表」是问题大类预配置的标准名称。"
-    "若当前对话讨论的问题与其中某一项属于同一类问题(同类故障/同类事项,"
-    "不要求同一台机器或同一用户),必须原样输出该标准标签,不得新造同义标签。\n"
-    "2. 标签为 2~10 字中文短语(沿用标准标签时原样输出即可),概括对话讨论的功能或问题"
-    "(例如:投屏、远场语音唤不醒、蓝牙连接)。\n"
-    "3. 仅当能确认当前对话与某已有主题是同一台机器/同一故障案例的延续"
-    "(如出现相同机器编号/UUID/MAC,或同一用户且前文明确在接续讨论该故障)"
-    "时,才必须原样沿用对应的已有标签,不得新造同义标签。\n"
-    "   注意:仅措辞或关键词相似(如都提到「推送」「闪退」「二维码」)但机器、用户、"
-    "前文上下文与该主题无关联的,是全新问题,必须给新标签;\n"
-    "   拿不准是否同一案例时,优先给新标签(宁可多一个对话,不可把新问题混进旧对话)。\n"
-    "4. 只输出标签本身,不要引号、标点或任何解释。"
+    "1. 只能从「可选标签」中选一个,必须原样输出标签文字,"
+    "不得改写、缩写、近义替换或新造标签。\n"
+    "2. 若这段对话讨论的现象无法归入任何可选标签,输出 UNKNOWN。"
+    "宁可判为 UNKNOWN 交给人工,也不要硬套一个最接近的标签。\n"
+    "3. 标签描述的是「用户遇到什么问题」(现象),不是「我们做了什么」(动作)。"
+    "出现「已推」「上门」「远程删除」「恢复出厂」等字样,只说明处理动作或操作,"
+    "不代表问题类型,要回到用户反馈的现象本身去归类。\n"
+    "4. 一段对话只归一个标签:以主要诉求为准,不要罗列多个,也不要输出大类名。\n"
+    "5. 只输出 JSON,不要解释、不要代码块:\n"
+    '   {"topic": "标签原文或 UNKNOWN", "confidence": 0.0}\n'
+    "   confidence 取 0~1,表示你对该归类的把握;拿不准就给低分。"
 )
 
 # 分类失败后,同一组的最小重试间隔(秒),防止 LLM 故障时反复打
@@ -94,6 +95,56 @@ def get_standard_labels(session) -> list[str]:
                 seen.add(t)
                 labels.append(t)
     return labels
+
+
+def get_standard_tree(session) -> list[dict]:
+    """问题大类树:[{name, topics:[...], sub:[{name, topics:[...]}]}]。
+
+    与 `get_standard_labels` 的区别:这里保留「大类 > 子类」的层级,
+    供提示词用结构化形式列出闭集,让 LLM 在大类语境下选小类,减少跨类误判。
+    """
+    from app.models.topic_group import TopicGroup
+
+    rows = (
+        session.query(TopicGroup).order_by(TopicGroup.sort_order, TopicGroup.id).all()
+    )
+    by_name = {r.name: r for r in rows}
+    children: dict[str, list] = {}
+    for r in rows:
+        if r.parent and r.parent in by_name:
+            children.setdefault(r.parent, []).append(r)
+
+    def _topics(row) -> list[str]:
+        return [t.strip() for t in (row.topics or []) if (t or "").strip()]
+
+    tree: list[dict] = []
+    for r in rows:
+        if r.parent and r.parent in by_name:
+            continue  # 子类只作为父类的 sub 出现,不单独成顶层
+        node: dict = {"name": r.name, "topics": _topics(r)}
+        subs = [
+            {"name": c.name, "topics": _topics(c)}
+            for c in children.get(r.name, [])
+            if _topics(c)
+        ]
+        if subs:
+            node["sub"] = subs
+        tree.append(node)
+    return tree
+
+
+def _tree_prompt_text(tree: list[dict]) -> str:
+    """把大类树渲染成提示词里的闭集清单(只列叶子标签,大类只作语境)。"""
+    lines: list[str] = []
+    for node in tree:
+        if node.get("topics"):
+            lines.append(f"- {node['name']}: " + " / ".join(node["topics"]))
+        for sub in node.get("sub", []):
+            if sub.get("topics"):
+                lines.append(
+                    f"- {node['name']} > {sub['name']}: " + " / ".join(sub["topics"])
+                )
+    return "\n".join(lines)
 
 
 class TopicService:
@@ -291,6 +342,7 @@ class TopicService:
                 # 分类后新到达的组内消息 topic 为空,统一回填(幂等 UPDATE)
                 repo.set_topic_for_group(chat_id, root_message_id, existing_topic)
                 ConversationRepo(session).set_topic(chat_id, root_message_id, existing_topic)
+                self._sync_stage(repo, session, chat_id, root_message_id, rows)
                 session.commit()
                 label = existing_topic
                 to_merge = existing_topic if merge else ""
@@ -302,9 +354,13 @@ class TopicService:
                     repo, chat_id, current_text=current_text
                 )
                 standards = get_standard_labels(session)
+                standards_set = set(standards)
+                tree = get_standard_tree(session)
                 first_id = min(m.id for m in rows)
                 context = repo.list_recent_before(chat_id, first_id, limit=6)
-                label = self._llm_label(rows, samples, context, standards)
+                label, conf = self._llm_decide(
+                    rows, samples, context, standards, tree
+                )
                 if not label:
                     raise LLMError("LLM 返回空标签")
                 # 标签归一化:别名收敛 -> 标准标签原样 -> (可选)相似度兜底。
@@ -318,18 +374,53 @@ class TopicService:
                 )
                 if not label:
                     raise LLMError("LLM 标签归一化后为空")
+                # 闭集校验:配置了标准标签时,只接受闭集内的标签。
+                # 闭集外(含 LLM 明确返回 UNKNOWN、或仍在输出「已推」这类动作词)
+                # 一律不入库,保留「未分类」——宁可空着等人工,也不把动作词
+                # 当主题写进去(动作词会污染大类统计,还会触发同标签错误归并)。
+                if standards_set and label not in standards_set:
+                    logger.info(
+                        "未能归类 %s/%s: %r 不在闭集内,保留未分类",
+                        chat_id,
+                        root_message_id,
+                        label,
+                    )
+                    self._sync_stage(repo, session, chat_id, root_message_id, rows)
+                    session.commit()
+                    return ""
                 repo.set_topic_for_group(chat_id, root_message_id, label)
+                repo.set_topic_conf_for_group(chat_id, root_message_id, conf)
                 # conversations.topic 此前无人写入(页面读到恒为空),随分类同步
                 ConversationRepo(session).set_topic(chat_id, root_message_id, label)
+                self._sync_stage(repo, session, chat_id, root_message_id, rows)
                 session.commit()
-                logger.info("主题分类 %s/%s -> %s", chat_id, root_message_id, label)
+                logger.info(
+                    "主题分类 %s/%s -> %s (conf=%.2f)",
+                    chat_id,
+                    root_message_id,
+                    label,
+                    conf,
+                )
                 # 标准标签=问题大类标准名,多个不同案例共享:只归类不合并,
                 # 同案例的后续会话交给会话缝合(conv_stitch)处理
-                to_merge = label if (merge and label not in standards) else ""
+                to_merge = label if (merge and label not in standards_set) else ""
         # 归并用独立 session,避免与分类 session 并发占用连接
         if to_merge:
             self._merge_topic(chat_id, to_merge)
         return label
+
+    @staticmethod
+    def _sync_stage(repo, session, chat_id: str, root_message_id: str, rows: list) -> None:
+        """按组内全部消息重算处理阶段并写回(messages + conversations)。
+
+        与打标签同事务提交。stage 是纯规则判定,即使 LLM 未配置/未归类也会更新,
+        这样「已推/已上门/已解决」不再依赖分类是否成功。
+        """
+        from app.services.stage import detect_stage
+
+        stage = detect_stage(m.text for m in rows)
+        repo.set_stage_for_group(chat_id, root_message_id, stage)
+        ConversationRepo(session).set_stage(chat_id, root_message_id, stage)
 
     def _merge_topic(self, chat_id: str, topic: str) -> None:
         """打完标签后触发同主题归组。归并失败只告警,不影响分类结果。"""
@@ -512,7 +603,24 @@ class TopicService:
         samples: list[tuple[str, str]],
         context: list | None = None,
         standards: list[str] | None = None,
+        tree: list[dict] | None = None,
     ) -> str:
+        """只要标签文本(兼容旧调用方);需要置信度请用 _llm_decide。"""
+        return self._llm_decide(rows, samples, context, standards, tree)[0]
+
+    def _llm_decide(
+        self,
+        rows: list,
+        samples: list[tuple[str, str]],
+        context: list | None = None,
+        standards: list[str] | None = None,
+        tree: list[dict] | None = None,
+    ) -> tuple[str, float]:
+        """调 LLM 做闭集判别,返回 (标签, 置信度)。
+
+        提示词按「大类 > 子类」列出可选标签,模型只做选择题;
+        返回值经 _parse_decision 解析,兼容模型偶发输出纯文本的旧格式。
+        """
         lines = []
         for m in self._repr_rows(rows):
             text = (m.text or "").strip() or f"({m.message_type or '非文本'})"
@@ -534,15 +642,64 @@ class TopicService:
                 f"[{_fmt_time(m.create_time)}] {m.sender_id or '?'}{tag}: {text[:60]}"
             )
         context_str = "\n".join(ctx_lines) if ctx_lines else "(无)"
-        standards_str = "、".join(standards) if standards else "(无)"
+        if tree:
+            spec_str = _tree_prompt_text(tree)
+        elif standards:
+            spec_str = "、".join(standards)
+        else:
+            spec_str = ""
+        spec_str = spec_str or "(未配置标准标签,可归纳一个 2~10 字的问题现象短语)"
         user_prompt = (
-            f"标准标签(问题大类预配置的标准名称,同类问题必须原样沿用其一):\n{standards_str}\n\n"
+            f"可选标签(闭集,只能从中选一个,不得新造):\n{spec_str}\n\n"
             f"本组之前的最近消息(按时间升序,用于判断是否延续前面讨论):\n{context_str}\n\n"
-            f"已有主题(附各主题最近一条消息摘要):\n{existing_str}\n\n"
+            f"已有主题(附各主题最近一条消息摘要,仅供判断同类历史):\n{existing_str}\n\n"
             f"当前对话内容:\n" + "\n".join(lines)
         )
         raw = self._llm.chat(_SYSTEM_PROMPT, user_prompt)
-        return _clean_label(raw)
+        return self._parse_decision(raw)
+
+    @staticmethod
+    def _parse_decision(raw: str) -> tuple[str, float]:
+        """解析 LLM 输出 -> (标签, 置信度)。
+
+        优先按约定的 JSON 解析;模型仍输出纯文本时回退为「整段即标签」
+        (置信度 0=未提供),保证提示词升级不与旧调用方/测试冲突。
+        """
+        text = (raw or "").strip()
+        if not text:
+            return "", 0.0
+        # 去掉模型偶发包裹的 ```json 代码块围栏
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+        def _from_obj(obj) -> tuple[str, float] | None:
+            if not isinstance(obj, dict):
+                return None
+            topic = obj.get("topic") or obj.get("label") or obj.get("标签") or ""
+            try:
+                conf = float(obj.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            conf = max(0.0, min(1.0, conf))
+            return _clean_label(str(topic)), conf
+
+        try:
+            parsed = _from_obj(json.loads(text))
+        except (ValueError, TypeError):
+            parsed = None
+        if parsed is not None:
+            return parsed
+        # JSON 混在解释文字里:抓第一个 {...} 再试一次
+        match = re.search(r"\{.*\}", text, re.S)
+        if match:
+            try:
+                parsed = _from_obj(json.loads(match.group(0)))
+            except (ValueError, TypeError):
+                parsed = None
+            if parsed is not None:
+                return parsed
+        # 旧格式回退:整段当标签
+        return _clean_label(text), 0.0
 
 
 @lru_cache

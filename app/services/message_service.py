@@ -22,6 +22,7 @@ from app.models.conversation import Conversation
 from app.schemas.message import MessageCreate
 from app.services.case_key import extract_case_key
 from app.services.image_service import get_image_service
+from app.services.stage import update_group_stage
 from app.services.user_name_service import get_user_name_service
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -253,6 +254,14 @@ class MessageService:
                 create.message_type,
                 create.text[:80],
             )
+            # 处理阶段按规则重算(零 LLM 成本):每条新消息到达即刷新本组 stage,
+            # 使「已推/已上门/已解决」随对话推进实时更新,不依赖该组是否已打过标签
+            # (已打标签的组不会再走 LLM 分类,只有这条路径能跟上进展)。
+            try:
+                update_group_stage(self._session, create.chat_id, msg.root_message_id)
+            except Exception:  # noqa: BLE001
+                self._session.rollback()
+                logger.exception("刷新处理阶段失败(不影响入库)")
             # 异步调度主题分类(不阻塞入库)
             if self._topic_scheduler is not None:
                 try:

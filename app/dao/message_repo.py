@@ -151,6 +151,41 @@ class MessageRepo:
         )
         return self._session.execute(stmt).rowcount or 0
 
+    def set_stage_for_group(
+        self, chat_id: str, root_message_id: str, stage: str
+    ) -> int:
+        """整组(同一回复链)统一写处理阶段,返回影响行数。
+
+        与 topic 正交:topic 描述现象,stage 描述进展,两者各自独立更新。
+        """
+        from sqlalchemy import update
+
+        stmt = (
+            update(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.root_message_id == root_message_id,
+            )
+            .values(stage=stage)
+        )
+        return self._session.execute(stmt).rowcount or 0
+
+    def set_topic_conf_for_group(
+        self, chat_id: str, root_message_id: str, conf: float
+    ) -> int:
+        """整组写入归类置信度(0~1),供置信分流与人工复核排序使用。"""
+        from sqlalchemy import update
+
+        stmt = (
+            update(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.root_message_id == root_message_id,
+            )
+            .values(topic_conf=conf)
+        )
+        return self._session.execute(stmt).rowcount or 0
+
     def get_existing_topics(self, limit: int = 100) -> list[str]:
         stmt = (
             select(Message.topic)

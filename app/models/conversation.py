@@ -41,6 +41,8 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)
     # LLM 主题标签(沿用 messages.topic 语义),空=未分类
     topic: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
+    # 处理阶段(沿用 messages.stage 语义):待处理/处理中/已推送/已上门/已解决;空=未判定
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     # 所属案例组代表会话 id;0=独立案例。
     # 软合并专用:同一案例的多段对话共享同一 case_id(指向该组最早会话),只关联不移行。
     case_id: Mapped[int] = mapped_column(

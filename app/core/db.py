@@ -74,6 +74,7 @@ def init_db() -> None:
     _ensure_topic_group_columns()
     _ensure_case_key_column()
     _ensure_conversation_case_id()
+    _ensure_stage_columns()
     logger.info("数据库表结构就绪: %s", mask_db_url(get_settings().database_url))
 
 
@@ -260,6 +261,36 @@ def _ensure_conversation_case_id() -> None:
             )
         )
         logger.info("conversations 表新增列 case_id")
+
+
+def _ensure_stage_columns() -> None:
+    """轻量迁移:补 stage(处理阶段)与 topic_conf(归类置信度)列。
+
+    - messages.stage / conversations.stage:待处理/处理中/已推送/已上门/已解决
+    - messages.topic_conf:LLM 自评置信度(0~1),0=未提供
+    两列均与 topic 正交,存量数据默认空/0,不改变旧代码语义。
+    新建表上 create_all 已含这些列,这里只处理存量库。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = sa_inspect(engine)
+    tables = set(inspector.get_table_names())
+    for table, col, ddl in (
+        ("messages", "stage", "VARCHAR(32) NOT NULL DEFAULT ''"),
+        ("messages", "topic_conf", "FLOAT NOT NULL DEFAULT 0"),
+        ("conversations", "stage", "VARCHAR(32) NOT NULL DEFAULT ''"),
+    ):
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if col in existing:
+            continue
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            )
+        logger.info("%s 表新增列 %s", table, col)
 
 
 def check_db_connection() -> bool:

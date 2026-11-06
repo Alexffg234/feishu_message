@@ -58,6 +58,21 @@ class ConversationRepo:
         )
         return self._session.execute(stmt).rowcount or 0
 
+    def set_stage(self, chat_id: str, root_message_id: str, stage: str) -> int:
+        """同步对话表的处理阶段(messages.stage 由 MessageRepo 写)。
+
+        与 topic 正交:同一对话的现象标签不变,阶段随处理进展推进。
+        """
+        stmt = (
+            update(Conversation)
+            .where(
+                Conversation.chat_id == chat_id,
+                Conversation.root_message_id == root_message_id,
+            )
+            .values(stage=stage)
+        )
+        return self._session.execute(stmt).rowcount or 0
+
     def update_group_stats(self, conversation_id: int) -> None:
         """重算对话的 message_count / participant_count / 时间范围。"""
         # 先 flush 挂起的 conversation_id 修改,确保统计能读到最新值
@@ -166,6 +181,10 @@ class ConversationRepo:
             "create_time": m.create_time,
             "parent_message_id": m.parent_message_id,
             "topic": m.topic,
+            # 处理阶段(与 topic 正交):待处理/处理中/已推送/已上门/已解决
+            "stage": m.stage or "",
+            # 归类置信度(0~1),前端可据此标注「待复核」
+            "topic_conf": float(m.topic_conf or 0.0),
             # 新问题块起点(带已有标签的新消息并入对话时=1,前端画横杠)
             "block_start": int(m.block_start or 0),
             "mentions": mentions or {},

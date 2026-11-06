@@ -53,7 +53,11 @@ async function loadSummary(id){
     if(d.enabled){st.textContent='LLM 已启用';st.className='llm-status llm-on';}
     else{st.textContent='LLM 未配置';st.className='llm-status llm-off';}
 
-    if(d.topic){topicB.textContent='主题 · '+d.topic;topicB.style.display='inline-block';}
+    // 主题(现象)与阶段(进展)分开展示:主题只说是什么问题,阶段只说处理到哪一步
+    const topicTxt = d.topic ? ('主题 · '+d.topic) : '';
+    const stageTxt = d.stage ? ('阶段 · '+d.stage) : '';
+    const headTxt = [topicTxt, stageTxt].filter(Boolean).join('　');
+    if(headTxt){topicB.textContent=headTxt;topicB.style.display='inline-block';}
     if(d.summary){boxS.className='summary';boxS.textContent=d.summary;}
     else{boxS.className='empty-note';boxS.textContent = d.enabled?'(生成失败,请稍后重试)':'(未配置 LLM,无法生成总结文案;在服务器 config/.env 填 LLM_API_BASE/KEY/MODEL 后生效)';}
 

@@ -42,6 +42,9 @@ def _on_receive(data: P2ImMessageReceiveV1, session_factory) -> None:
 @lru_cache
 def get_event_queue() -> EventQueue:
     """进程级事件队列单例(每个 gunicorn worker 一份)。"""
+    from app.core.config import get_settings
+
+    settings = get_settings()
     return EventQueue(
         process_fn=lambda data: _on_receive(data, _session_factory()),
         maxsize=1000,
@@ -50,6 +53,9 @@ def get_event_queue() -> EventQueue:
         # 注入 SessionLocal 启用 outbox 持久化(at-least-once):
         # 事件先落库再应答,worker 崩溃/重启后可恢复,不再丢失在途事件。
         session_factory=_session_factory(),
+        # 处理租约:处理期间有心跳续期,所以这里可以保持短——进程真崩溃时
+        # 最多等这么久就被回收重跑,而慢任务(媒体下载/上传)不会被误抢。
+        claim_lease_ms=max(1000, settings.event_claim_lease_seconds * 1000),
     )
 
 

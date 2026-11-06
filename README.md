@@ -275,9 +275,16 @@ python scripts/query_messages.py --json export.json   # 导出为JSON
 | 环节 | 机制 |
 |---|---|
 | 认领 | `UPDATE ... WHERE status IN (pending, retrying, processing) AND retry_at_ms <= now`,乐观守卫抢锁,多 worker 只有一个能抢到 |
-| 处理租约 | 认领即把 `retry_at_ms` 推到 `now + 60s`;worker 崩溃后行停在该状态,租约到期自动被回收重处理 |
+| 处理租约 | 认领即把 `retry_at_ms` 推到 `now + 租约`(默认 60s,`EVENT_CLAIM_LEASE_SECONDS`);worker 崩溃后行停在该状态,租约到期自动被回收重处理 |
+| 续租心跳 | 处理期间每 `租约/3` 续一次租(CAS:`WHERE retry_at_ms = 上次写入值`),慢任务不会被误判成「持有者崩了」——`WHERE retry_at_ms = 上次写入值` 是关键,无条件写会把已被别人回收的租约改回自己的,两边都以为自己持有 |
 | 重试 | 失败写 `status=retrying` + 退避到期时间(默认 5s / 30s / 120s),到期后被重新认领 |
 | 重试耗尽 | 标 `failed` 并追加 `data/dead_events.jsonl` 死信,`/healthz` 会报行数 |
+
+**为什么要心跳,而不是把租约调大**:表里「处理慢」和「持有者死了」长得一模一样。
+`handle_receive_event` 里有图片/视频下载 + 七牛上传,慢网下几十秒级,一旦超过租约,
+同一事件会被另一个 worker 抢走重跑(数据不丢,幂等键兜底,但会重复下载/上传、
+`attempt` 虚增、日志互相打架)。把租约调到 5 分钟能躲过慢任务,代价是进程真崩溃时
+积压要等 5 分钟才恢复。心跳让两者都要:租约保持 60s(崩溃恢复快),长任务自我延期。
 
 **消费循环的整体异常护栏**(`_run_persistent` 的 try/except)不是防御性代码,是必需项:
 一行瞬时 DB 异常(死锁 1213 / 锁等待超时 1205 / 连接被服务端掐断 / 主从切换)原来会
@@ -718,6 +725,12 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **事件队列:处理租约加心跳续期,租约可配**
+  - 新增 `_LeaseKeeper`:处理期间每 `租约/3` 续租一次,CAS 条件 `WHERE retry_at_ms = 上次写入值`。表里「处理慢」和「持有者崩了」长得一样,不续租就会被别的 worker 抢走重跑(`handle_receive_event` 里媒体下载 + 七牛上传是几十秒级);无条件续租更糟——会把已被回收的租约改回自己的,两边都以为自己持有
+  - 之所以不直接把租约调到 5 分钟:那样进程真崩溃时积压要等 5 分钟才恢复。心跳让租约保持 60s(恢复快)+ 长任务自我延期
+  - 新增配置 `EVENT_CLAIM_LEASE_SECONDS`(默认 60),`get_event_queue()` 传 `claim_lease_ms`;`_ClaimedRow` 加 `lease_until_ms` 作为 CAS 基准
+  - 心跳必须在写 `done` / `retrying` **之前**停掉,否则它的 CAS 会失败并误报「租约已被回收」
+  - 新增 2 项测试:慢任务(卡住 1s vs 租约 300ms)全程抢不走;租约被回收后必须上报 `lost` 且不再改写对方的租约。已验证把 `_LeaseKeeper.start` 打成空操作后第一条测试会失败(不是在空转)
 - **事件队列:消费循环加异常护栏 + 修掉测试环境的假故障**
   - `_run_persistent` 原来没有异常护栏:一行瞬时 DB 异常(死锁 1213 / 锁等待超时 1205 / 连接被掐 / 主从切换)从 `_claim_next` 冒出去就**终结消费线程**,队列永久停摆,现场只剩 threading 打的一行 stderr——监控上看不出「队列停了」。现在捕获后退避 0.5s 继续,认领/标记失败靠租约 + 重试自愈;新增 `_CONSUMER_ERROR_BACKOFF`
   - 偶发失败的 `test_persistent_retry_then_success` 根因**不在被测代码**:测试用 `sqlite://` + `StaticPool`,消费者线程与测试线程**共用一条连接**,测试线程每关一次 session 就把消费者正在写的事务 rollback 掉。压测 40 轮 dump 出三种症状——`cannot commit - no transaction is active`(提交报错)、commit 静默变空操作(行卡在 `processing`,`retry_at` 还剩 52s,等租约 60s)、异常冒到 `_claim_next` 打死线程。改为**文件型 SQLite**(每次 session 独占连接,唯一文件名保证用例隔离)

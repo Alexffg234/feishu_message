@@ -49,6 +49,9 @@ class _ClaimedRow:
     event_key: str
     payload: str
     attempt: int
+    # 认领时写入的租约到期时刻(ms)。心跳续租拿它做 CAS 基准:只有
+    # retry_at_ms 还等于这个值才说明行仍归自己,否则已被别的 worker 回收。
+    lease_until_ms: int = 0
 
 # 内存模式下退避重试的批量刷新窗口(秒);outbox 模式下为轮询间隔
 _EMPTY_WAIT = 0.2
@@ -57,6 +60,86 @@ _FLUSH_WAIT = 0.05
 # outbox 消费循环撞上瞬时 DB 异常后的重试间隔(秒)。不能直接 continue:
 # DB 长时间不可用时会退化成高频空转 + 刷日志。
 _CONSUMER_ERROR_BACKOFF = 0.5
+
+
+class _LeaseKeeper:
+    """处理期间替自己续租,避免慢任务被当成「疑似崩溃」抢走重跑。
+
+    认领时把 `retry_at_ms` 推到 `now + 租约`;任何 worker 看到 processing 且
+    租约已过期,就认为持有者崩了并回收。问题在于**「处理慢」和「持有者死了」
+    在表里长得一模一样**:图片/视频下载 + 七牛上传是几十秒级的,一旦超过租约,
+    同一事件的另一个 worker 会把行抢走重跑(不丢数据,但重复下载/上传,还会
+    让 attempt 虚增、日志互相打架)。
+
+    两种解法都行不通:租约调到几分钟,真崩溃时积压要等几分钟才恢复;只调长不
+    续期,遇到比租约更慢的任务照旧被抢。所以用心跳——租约可以保持短(崩溃恢复
+    快),长任务靠每 `租约/3` 续一次租自我延期。
+
+    续租用 CAS(`WHERE retry_at_ms = 上次写入的租约到期时刻`),不是无条件写:
+    一旦别的 worker 已经回收重跑,自己就不该再动那行的租约,否则会把对方的
+    租约改成自己的,谁都判不出来。CAS 失败即认为租约已丢,停止续租并上报。
+    """
+
+    def __init__(self, session_factory, row: "_ClaimedRow", lease_ms: int) -> None:
+        self._session_factory = session_factory
+        self._row_id = row.id
+        self._lease_until = row.lease_until_ms
+        self._lease_ms = lease_ms
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lost = False
+        # 续租间隔 = 租约/3:留两次失败重试的余量,又不至于把租约压得太紧
+        self._interval = max(0.05, lease_ms / 3000.0)
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="outbox-lease", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def lost(self) -> bool:
+        """租约是否已被别的 worker 拿走(自己成了重复处理方)。"""
+        return self._lost
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            if not self._renew():
+                return
+
+    def _renew(self) -> bool:
+        now = int(time.time() * 1000)
+        new_lease = now + self._lease_ms
+        try:
+            with self._session_factory() as session:
+                result = session.execute(
+                    update(EventOutbox)
+                    .where(
+                        EventOutbox.id == self._row_id,
+                        EventOutbox.status == "processing",
+                        EventOutbox.retry_at_ms == self._lease_until,
+                    )
+                    .values(retry_at_ms=new_lease)
+                )
+                session.commit()
+        except Exception:  # noqa: BLE001
+            # 续租失败不是致命问题:下一次心跳还会试;真丢了租约,下游还有
+            # 幂等键兜底,不值得为此中断处理。
+            logger.warning("outbox 续租失败 key-row=%d", self._row_id, exc_info=True)
+            return True
+        if result.rowcount != 1:
+            self._lost = True
+            logger.warning(
+                "outbox 租约已被回收,当前 worker 的处理是重复执行 id=%d", self._row_id
+            )
+            return False
+        self._lease_until = new_lease
+        return True
 
 
 def _extract_event_id(item: Any) -> str | None:
@@ -367,6 +450,7 @@ class EventQueue:
         返回轻量记录(会话已关闭,避免 DetachedInstanceError),字段与 ORM 行对齐。
         """
         now = int(time.time() * 1000)
+        lease_until = now + self._claim_lease_ms
         with self._session_factory() as session:
             row = (
                 session.query(EventOutbox)
@@ -391,7 +475,7 @@ class EventQueue:
                 )
                 .values(
                     status="processing",
-                    retry_at_ms=now + self._claim_lease_ms,
+                    retry_at_ms=lease_until,
                 )
             )
             session.commit()
@@ -402,16 +486,24 @@ class EventQueue:
                 event_key=row.event_key,
                 payload=row.payload,
                 attempt=row.attempt,
+                lease_until_ms=lease_until,
             )
 
     def _process_outbox(self, row: "_ClaimedRow") -> None:
+        # 处理期间续租:慢任务(媒体下载 + 上传)不该被别的 worker 当成崩溃抢走
+        lease = _LeaseKeeper(self._session_factory, row, self._claim_lease_ms)
+        lease.start()
         try:
             data = _payload_to_item(row.payload)
             self._process_fn(data)
         except Exception as exc:  # noqa: BLE001
+            # 必须先停心跳再写状态:心跳的 CAS 条件是 status='processing',
+            # 写在 mark_retry 之后会 CAS 失败并误报「租约已被回收」
+            lease.stop()
             logger.exception("事件处理失败 key=%s(第 %d 次)", row.event_key, row.attempt + 1)
             self._mark_retry_or_failed(row, exc)
             return
+        lease.stop()
         self._mark_done(row)
 
     def _mark_done(self, row: "_ClaimedRow") -> None:

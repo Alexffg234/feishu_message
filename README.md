@@ -402,6 +402,46 @@ GET /messages/topics?chat_id=oc_xxx&limit=20
 
 返回每个主题 `{topic, group_count, message_count, senders, groups:[...]}`。
 
+### 标签治理(闭集上线后最该盯的几件事)
+
+闭集判别的取舍是「宁可空着,也不写脏标签」。所以真正的风险从「标签写错」变成
+**「未分类静默堆积」**:LLM 选不出标准标签就输出 `UNKNOWN`,那组落成未分类,
+而 `list_topics` 只查 `topic != ''`,页面上根本看不见这批数据。三个配套入口:
+
+```bash
+# 1. 未分类清单:哪些组没打上标签、它们在说什么(+ 高频词,看闭集缺哪类现象)
+python scripts/unclassified.py --words --limit 100
+
+# 2. 别名表冷启动:非标准标签 -> 最相近标准标签的建议(默认只打印,Dice 打分)
+python scripts/suggest_aliases.py
+python scripts/suggest_aliases.py --apply --min-score 0.6    # 达标的写入 topic_aliases
+
+# 3. 组内空标签 + conversations.topic 回填(运行时已自动做,这里补历史存量)
+python scripts/backfill_group_topic.py --dry-run
+python scripts/backfill_group_topic.py
+```
+
+- **相似度兜底默认开启**(`TOPIC_ALIAS_SIM_THRESHOLD=0.65`):闭集要求 LLM 输出
+  标准标签原文,但实测常有 near-miss(少写/多写「类问题」后缀,
+  如「画面模糊」vs「画面模糊类问题」dice=0.67)。不给兜底,这类输出会被闭集
+  直接判死成未分类——那是**可避免的**未分类。兜底之后仍有闭集校验,即便映射到
+  不存在的标签也只落回未分类,不会写脏标签。设 0 可回到「只认精确匹配」。
+- **已打标组的新消息会零成本回填**:组已有标签时不再调 LLM,只把新到消息的
+  `topic` 补成组内标签并同步 `conversations.topic`(旧行为是直接跳过,
+  导致同组内标签不一致 14 组/40 条)。
+- **别名表只影响之后的分类收敛**,不会改写历史 `messages.topic`。要改写存量需另跑
+  `label_merge`(近义归并,会物理合并同标签组),建议放在
+  `scripts/split_cases.py` 切分**之后**,避免把不同问题重新并到一起。
+
+标签质量的度量在 `GET /api/topic_metrics`(只读,curl 查看):
+
+| 字段 | 含义 | 目标 |
+|---|---|---|
+| `unclassified.rate` | 未分类组占比 | 盯住不上升;上升说明闭集缺现象 |
+| `standard_coverage.rate` / `unused_standards` | 标准标签被用到的比例 / 从没被用到的标准 | `unused_standards` 长期偏多 = 标准集有冗余项,或闭集缺别名映射 |
+| `confidence` | 已归类组的置信度分档(高≥0.8 / 中 / 低 / 无) | 中低档即人工复核队列 |
+| `low_frequency_ratio` | 只用过 1 次的标签占比 | 衡量同义分裂是否被收敛 |
+
 ## 鉴权提示
 
 `/healthz` 提供**可观测性探活**（免登录），返回数据库连通、事件队列积压、死信数量、最近入库时间（数据新鲜度）：
@@ -433,6 +473,13 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **`117e919` feat(topic): 未分类治理——相似度兜底 / 组内空标签回填 / 未分类清单**
+  - 相似度兜底默认开启(`topic_alias_sim_threshold` 0 → 0.65):闭集要求输出标准标签原文,但常有 near-miss(「画面模糊」vs「画面模糊类问题」dice=0.67),不给兜底就被闭集判死成未分类;兜底后仍有闭集校验,映射不到只落回未分类,不会写脏标签
+  - `TopicService.backfill_group_topic`:已打标组来了新消息只做零成本回填(补 `topic` + 同步 `conversations.topic`),不再调 LLM——修掉「组已有标签后新消息永远 topic=""」(14 组/40 条)与 `conversations.topic` 为空(19 组)两个存量不一致
+  - 新增 `MessageRepo.list_unclassified_roots` / `count_unclassified_roots`:按组聚合、`having` 判定整组无标签,跨库可移植
+  - 新脚本:`unclassified.py`(未分类清单 + 高频 2-gram)、`suggest_aliases.py`(非标准标签→标准标签 Dice 建议,`--apply` 才写别名表)、`backfill_group_topic.py`(存量回填,复用运行时同一方法)
+  - `/api/topic_metrics` 新增 `unclassified` / `standard_coverage` / `confidence` 三组指标
+  - 新增 `tests/test_topic_governance.py`(9 项)
 - **`2e87cf2` feat(topic): 问题单元切分——把混了多个问题的对话切成一个问题一个对话**
   - 新增 `app/services/case_split.py`:确定性切点(换设备 `case_key` 变化 / `block_start` 标记 / 时间断档 > 2h),纯客套片并回上一片、图片片不当噪声;落地复用 `conversation_split.split_conversation`(计划精确覆盖校验、重挂消息、回复边迁移、统计重算),不重写拆库逻辑
   - 新增 `scripts/split_cases.py`:`--stats` 对比各阈值切分规模、默认 dry-run、`--apply` 落库、`--relabel` 立即重新归类

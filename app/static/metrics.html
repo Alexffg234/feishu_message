@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>标签指标</title>
+<link rel="stylesheet" href="/static/components.css?v=1.0.0">
+<link rel="stylesheet" href="/static/metrics.css?v=1.0.0">
+</head>
+<body>
+<div id="app-nav"></div>
+<div class="wrap">
+  <h1 class="page-title">标签指标</h1>
+  <div class="page-sub">
+    闭集判别 / 候选召回 / 人工复核的质量度量 ·
+    数据源 <code>GET /api/topic_metrics</code>
+  </div>
+
+  <div class="mt-bar">
+    <button class="btn" type="button" id="btnReload">刷新</button>
+    <label class="mt-chk">
+      <input type="checkbox" id="autoRefresh">
+      每 30 秒自动刷新
+    </label>
+    <button class="btn btn--ghost" type="button" id="btnJson">原始 JSON</button>
+    <span class="mt-stamp" id="stamp"></span>
+  </div>
+
+  <div id="verdict"><div class="loading">加载中…</div></div>
+
+  <div class="mt-kpis" id="kpis"></div>
+
+  <div class="card">
+    <h2 class="mt-h2">置信度分布</h2>
+    <div class="mt-sub">取组内最大 <code>topic_conf</code>。高置信自动放过,中/低进复核队列。</div>
+    <div id="conf"></div>
+  </div>
+
+  <div class="card">
+    <h2 class="mt-h2">标准标签用量 <span class="mt-h2__meta" id="usageMeta"></span></h2>
+    <div class="mt-sub">
+      按大类分组,括号里是「被多少个组用到」。用量 <b>0</b> = 挂着没人用:
+      要么标准集有冗余,要么提示词没覆盖到这种现象。
+    </div>
+    <div id="usage"></div>
+  </div>
+
+  <div class="card" id="offCard">
+    <h2 class="mt-h2">非标准标签漏网 <span class="mt-h2__meta" id="offMeta"></span></h2>
+    <div class="mt-sub">
+      库内用过、但不在标准集里的标签 —— 说明别名表没覆盖到。
+      跑 <code>python scripts/suggest_aliases.py</code> 扫一遍建议,达标的再 <code>--apply</code>。
+    </div>
+    <div id="offStd"></div>
+  </div>
+
+  <div class="card">
+    <h2 class="mt-h2">归并与碎片</h2>
+    <div class="mt-sub">
+      每个 <code>(群, 标签)</code> 的理想终态是 1 组(碎片已并回原问题块)。
+      归并率低说明同标签还散在多个组里;低频标签多说明同义词还在分裂。
+    </div>
+    <div id="merge"></div>
+  </div>
+
+  <div class="card">
+    <h2 class="mt-h2">进程内指标</h2>
+    <div class="mt-sub mt-sub--warn">
+      这三项是<b>进程内累计</b>(重启归零),只看趋势不看绝对值。
+      刚部署完看到 0 不代表坏了。
+    </div>
+    <div class="mt-mini" id="procs"></div>
+  </div>
+
+  <div class="mt-note">
+    <b>判断阈值不是拍脑袋:</b>未分类率 ≥15% 起警、≥30% 转红 —— 闭集判别的取舍是
+    「宁可空着也不写脏标签」,所以未分类率高说明<b>闭集缺现象</b>,不是模型不行;
+    <code>gold_groups = 0</code> 时页面顶部会明确说「所有准确率都不作数」——
+    没有人工基准,剩下的数字都只是模型自说自话。
+  </div>
+</div>
+
+<script src="/static/nav.js?v=1.0.0" defer></script>
+<script src="/static/metrics.js?v=1.0.0" defer></script>
+</body>
+</html>

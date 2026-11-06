@@ -1,0 +1,323 @@
+/* ==========================================================================
+   标签指标页专属样式
+   复用 components.css 的令牌与组件(.card/.btn/.loading/.empty),
+   这里只补本页独有的诊断横幅 / KPI / 横条 / 标签 chip,不重复定义 :root。
+   ========================================================================== */
+
+/* ------------------------------------------------------------ 工具栏 */
+.mt-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.mt-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mt-chk input { accent-color: var(--primary); cursor: pointer; }
+
+.mt-stamp {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------ 诊断横幅 */
+.mt-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.mt-v {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.mt-v__ico {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0a1120;
+}
+.mt-v__txt { min-width: 0; }
+.mt-v__act {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.mt-v__act code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--primary-strong);
+}
+
+.mt-v--ok { border-color: rgba(63, 199, 154, .32); background: var(--accent-soft); }
+.mt-v--ok .mt-v__ico { background: var(--accent-text); }
+.mt-v--warn { border-color: rgba(240, 180, 41, .38); background: var(--warn-bg); }
+.mt-v--warn .mt-v__ico { background: var(--warn-text); }
+.mt-v--danger { border-color: rgba(242, 119, 122, .42); background: var(--danger-bg); }
+.mt-v--danger .mt-v__ico { background: var(--danger-text); }
+.mt-v--info { border-color: rgba(59, 142, 222, .35); background: var(--primary-soft); }
+.mt-v--info .mt-v__ico { background: var(--primary-strong); }
+
+/* ------------------------------------------------------------ KPI */
+/* 6 个 KPI:桌面 3×2。auto-fit 在 880px 容器里会断成 5+1(最后一张孤零零
+   占一行),看着像漏了一个,所以这里写死列数。 */
+.mt-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.mt-kpi {
+  padding: 13px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.mt-kpi--warn { border-color: rgba(240, 180, 41, .38); background: var(--warn-bg); }
+.mt-kpi--danger { border-color: rgba(242, 119, 122, .42); background: var(--danger-bg); }
+
+.mt-kpi__num {
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--primary-strong);
+  font-variant-numeric: tabular-nums;
+}
+.mt-kpi--warn .mt-kpi__num { color: var(--warn-text); }
+.mt-kpi--danger .mt-kpi__num { color: var(--danger-text); }
+.mt-kpi__num small {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: .8;
+  margin-left: 1px;
+}
+
+.mt-kpi__lbl {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.mt-kpi__hint {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+/* ------------------------------------------------------------ 卡片标题 */
+.mt-h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+.mt-h2__meta {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.mt-sub {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.mt-sub--warn { color: var(--warn-text); }
+.mt-sub b { color: var(--text); font-weight: 600; }
+.mt-sub code,
+.mt-note code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--primary-strong);
+}
+
+/* ------------------------------------------------------------ 横条列表 */
+.mt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.mt-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 96px) 1fr 96px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.mt-row__lbl { color: var(--text-muted); white-space: nowrap; }
+.mt-row__num {
+  text-align: right;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mt-row__num b { color: var(--text); font-weight: 600; }
+
+.mt-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.mt-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary-dark), var(--primary-strong));
+  transition: width .45s var(--ease);
+}
+.mt-bar--ok i { background: linear-gradient(90deg, var(--primary-dark), var(--accent)); }
+.mt-bar--warn i { background: linear-gradient(90deg, #a97b12, var(--warn)); }
+.mt-bar--danger i { background: linear-gradient(90deg, #a33b3d, var(--danger)); }
+.mt-bar--faint i { background: var(--stroke-strong); }
+
+/* ------------------------------------------------------------ 标签 chip */
+.mt-grp { margin-bottom: 14px; }
+.mt-grp:last-child { margin-bottom: 0; }
+
+.mt-grp__t {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-bottom: 7px;
+  letter-spacing: .3px;
+}
+
+.mt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.mt-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.mt-chip__n {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 用量 0:挂着没人用 —— 视觉上要「弱」,但别彻底看不见 */
+.mt-chip--zero {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+/* 非标准标签:是漏洞,要「跳」出来 */
+.mt-chip--off {
+  border-color: rgba(242, 119, 122, .42);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+.mt-chip--off .mt-chip__n { color: var(--danger-text); opacity: .75; }
+
+.mt-okline {
+  font-size: 12.5px;
+  color: var(--accent-text);
+  padding: 6px 0;
+}
+
+/* ------------------------------------------------------------ 进程内指标 */
+.mt-mini {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.mt-mini__box {
+  padding: 12px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.mt-mini__t {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.mt-mini__n {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--primary-strong);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.mt-mini__n small { font-size: 12px; font-weight: 500; color: var(--text-faint); }
+.mt-mini__d {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+.mt-mini__d b { color: var(--warn-text); font-weight: 600; }
+.mt-mini__box--warn { border-color: rgba(240, 180, 41, .35); }
+.mt-mini__box--warn .mt-mini__n { color: var(--warn-text); }
+
+/* ------------------------------------------------------------ 说明 */
+.mt-note {
+  padding: 12px 14px;
+  border: 1px dashed var(--stroke);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-muted);
+}
+.mt-note b { color: var(--text); font-weight: 600; }
+
+/* ------------------------------------------------------------ 窄屏 */
+@media (max-width: 620px) {
+  .mt-kpis { grid-template-columns: repeat(2, 1fr); }
+  .mt-row { grid-template-columns: 78px 1fr 76px; gap: 8px; }
+  .mt-bar { display: none; }
+  .mt-row { grid-template-columns: 1fr auto; }
+}

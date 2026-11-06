@@ -617,7 +617,10 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     - false_merge_sample: 误合率需人工复核,此处返回抽样状态占位(不自动判定)
     - unclassified: 未分类组数/占比(闭集判别上线后最需要盯的指标:非标准标签被
       拒会静默落成未分类,不盯就会越堆越多)
-    - standard_coverage: 标准标签被用到的比例(闭集覆盖不到的现象 = 长期未分类)
+    - standard_coverage: 标准标签被用到的比例(闭集覆盖不到的现象 = 长期未分类)。
+      labels 是每个标准标签被多少组用到(0 = 挂着没人用 → 标准集冗余或提示词没覆盖),
+      off_standard 是「库内用过但不在标准集」的标签(别名没收敛的漏网,越少越好),
+      两者合起来就是体系漏洞视图:一个挂着没人用,一个用了却不在册
     - confidence: 已归类组的置信度分布(取组内最大 topic_conf),供低置信复核排期
     - recall: 候选召回命中情况(进程内累计)——narrow_rate 是「被判窄化」的调用占比,
       fallback_rate 是「窄化后仍判 UNKNOWN 用全集重问」的占比,**这个值就是召回的
@@ -632,7 +635,7 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     from app.services.label_norm import get_norm_stats
     from app.services.topic_recall import get_stats as get_recall_stats
     from app.services.topic_review import gold_stats, list_review_queue
-    from app.services.topic_service import get_standard_labels
+    from app.services.topic_service import get_standard_labels, get_standard_tree
 
     # ---- 标签分布:每 (chat_id, topic) 的分组数(组=distinct root_message_id) ----
     #     每个 (chat, topic) 的理想终态是 1 组(碎片已并回原问题块/缝合已关联)。
@@ -707,6 +710,33 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     used_labels = {t for (_c, t) in ct_groups}
     covered = len(standards & used_labels)
 
+    # 标签 -> 所属大类:瘦身后大类是平铺的,但仍按树展开,兼容「大类 > 子类」旧结构
+    std_group: dict[str, str] = {}
+    for node in get_standard_tree(db):
+        top = (node.get("name") or "").strip()
+        for t in node.get("topics") or []:
+            std_group.setdefault((t or "").strip(), top)
+        for sub in node.get("sub") or []:
+            sub_name = (sub.get("name") or "").strip()
+            for t in sub.get("topics") or []:
+                std_group.setdefault((t or "").strip(), f"{top} / {sub_name}")
+
+    # 每个标准标签被多少组用到(0 = 从没被用过,是标准集冗余或闭集提示词没覆盖到)
+    # 与 off_standard 一起构成「体系漏洞」视图:前者是挂着没人用的,后者是用了却不在册的。
+    label_usage = [
+        {
+            "label": t,
+            "groups": int(topic_group_total.get(t, 0)),
+            "group": std_group.get(t, ""),
+        }
+        for t in sorted(standards, key=lambda x: (-topic_group_total.get(x, 0), x))
+    ]
+    off_standard = [
+        {"label": t, "groups": int(n)}
+        for t, n in sorted(topic_group_total.items(), key=lambda kv: -kv[1])
+        if t not in standards
+    ]
+
     # ---- 人工复核闭环(review_queue 只取 1 条探针,total 是聚合计数) ----
     queue = list_review_queue(db, limit=1)
     gold = gold_stats(db)
@@ -739,6 +769,9 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
             "used_standard_count": covered,
             "rate": round(covered / len(standards), 4) if standards else 0.0,
             "unused_standards": sorted(standards - used_labels)[:20],
+            "labels": label_usage,
+            "off_standard": off_standard[:50],
+            "off_standard_count": len(off_standard),
         },
         "confidence": conf_buckets,
         "recall": get_recall_stats(),
@@ -986,6 +1019,16 @@ def review_page() -> HTMLResponse:
     去定标」——没有页面就等于没人用,所以给它一个入口。
     """
     return _page("review.html")
+
+
+@router.get("/metrics", response_class=HTMLResponse)
+def metrics_page() -> HTMLResponse:
+    """标签指标页面(app/static/metrics.html)。
+
+    指标端点只给 curl 看,等于没人看。而这个页面真正的价值不是「显示数字」,
+    是把数字翻译成「现在该做什么」——所以每个指标都配了阈值判断和动作建议。
+    """
+    return _page("metrics.html")
 
 
 def _page(filename: str) -> HTMLResponse:

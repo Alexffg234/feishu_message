@@ -92,6 +92,19 @@ _MIN_SUBSTANTIVE = 4
 _MENTION_RE = re.compile(r"@_user_\d+")
 
 
+def is_filler_only(text: str) -> bool:
+    """整条消息是否只有客套/确认(剔除 @ 占位符后没有实质内容)。
+
+    供问题单元切分复用:切出来的片若只有「好的谢谢」,不该单独成案。
+    空文本也算无可判内容(返回 True),调用方需自行决定是否采信。
+    """
+    cleaned = _MENTION_RE.sub("", text or "")
+    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(cleaned) if c.strip()]
+    if not clauses:
+        return True
+    return all(_FILLER_ONLY_RE.match(c) for c in clauses)
+
+
 def _is_question(clause: str) -> bool:
     """判断一句是否是提问(提问里的动作词不能当完成态)。"""
     c = clause.strip()

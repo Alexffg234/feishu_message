@@ -546,11 +546,15 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
       拒会静默落成未分类,不盯就会越堆越多)
     - standard_coverage: 标准标签被用到的比例(闭集覆盖不到的现象 = 长期未分类)
     - confidence: 已归类组的置信度分布(取组内最大 topic_conf),供低置信复核排期
+    - recall: 候选召回命中情况(进程内累计)——narrow_rate 是「被判窄化」的调用占比,
+      fallback_rate 是「窄化后仍判 UNKNOWN 用全集重问」的占比,**这个值就是召回的
+      漏检率**,持续偏高说明召回打分需要调(top_k 调大或换样例)
     """
     from sqlalchemy import case, func
 
     from app.services.conv_stitch import get_stitch_counts
     from app.services.label_norm import get_norm_stats
+    from app.services.topic_recall import get_stats as get_recall_stats
     from app.services.topic_service import get_standard_labels
 
     # ---- 标签分布:每 (chat_id, topic) 的分组数(组=distinct root_message_id) ----
@@ -656,6 +660,7 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
             "unused_standards": sorted(standards - used_labels)[:20],
         },
         "confidence": conf_buckets,
+        "recall": get_recall_stats(),
         "false_merge_sample": {
             "status": "needs_manual_review",
             "sample_size": 0,

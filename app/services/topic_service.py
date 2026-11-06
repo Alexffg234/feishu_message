@@ -35,6 +35,13 @@ from app.services.label_norm import clean_label as _clean_label  # noqa: F401 (�
 from app.services.label_norm import _STOP_LABELS  # noqa: F401 (兼容引用)
 from app.services.label_norm import normalize_label
 from app.services.llm import LLMClient, LLMError
+from app.services.topic_recall import (
+    EXEMPLARS_PER_LABEL,
+    filter_tree,
+    note_call,
+    note_fallback,
+    recall_standards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +78,16 @@ def _fmt_time(create_time: str) -> str:
         return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError):
         return create_time or "-"
+
+
+def _is_unknown(label: str) -> bool:
+    """LLM 是否明确表示「候选里一个都不像」(空标签或 UNKNOWN)。
+
+    只认这两种;输出闭集外的近义词不算——那是 normalize_label 相似度兜底的活,
+    拿全集重问一遍并不会让模型更接近标准名。
+    """
+    text = (label or "").strip()
+    return not text or text.upper() == "UNKNOWN"
 
 
 # 纯语气词/确认词:不构成主题,当作空标签重试(定义见 label_norm._STOP_LABELS)
@@ -401,9 +418,25 @@ class TopicService:
                 tree = get_standard_tree(session)
                 first_id = min(m.id for m in rows)
                 context = repo.list_recent_before(chat_id, first_id, limit=6)
-                label, conf = self._llm_decide(
-                    rows, samples, context, standards, tree
+                candidates, cand_tree = self._recall_candidates(
+                    repo, current_text, standards, tree
                 )
+                # 未窄化时候选子树为 None,要用完整树——否则提示词会从
+                # 「大类 > 子类」层级退化成平铺列表,丢掉大类语境
+                spec_tree = tree if cand_tree is None else cand_tree
+                label, conf = self._llm_decide(
+                    rows, samples, context, candidates, spec_tree
+                )
+                if cand_tree is not None and _is_unknown(label):
+                    # 召回可能把正确标签漏在候选之外:LLM 说「一个都不像」时
+                    # 用全集再问一次。只有窄化过才值得重问(否则是同一道题)。
+                    note_fallback()
+                    logger.info(
+                        "召回候选未命中 %s/%s,改用全集重问", chat_id, root_message_id
+                    )
+                    label, conf = self._llm_decide(
+                        rows, samples, context, standards, tree
+                    )
                 if not label:
                     raise LLMError("LLM 返回空标签")
                 # 标签归一化:别名收敛 -> 标准标签原样 -> (可选)相似度兜底。
@@ -479,6 +512,35 @@ class TopicService:
                     )
         except Exception:  # noqa: BLE001
             logger.exception("同主题归组失败(不影响分类) %s/%s", chat_id, topic)
+
+    def _recall_candidates(
+        self,
+        repo: MessageRepo,
+        current_text: str,
+        standards: list[str],
+        tree: list[dict],
+    ) -> tuple[list[str], list[dict] | None]:
+        """召回候选标签与对应的候选子树。
+
+        返回 (候选标签, 候选子树)。**未窄化时子树为 None**——调用方据此判断
+        「LLM 判 UNKNOWN 时是否需要拿全集重问」,避免同一道题问两遍。
+        """
+        top_k = get_settings().topic_recall_top_k
+        if not standards or top_k <= 0 or len(standards) <= top_k:
+            return standards, None
+        exemplars = repo.get_label_exemplars(
+            standards, per_label=EXEMPLARS_PER_LABEL
+        )
+        candidates = recall_standards(current_text, standards, exemplars, top_k=top_k)
+        narrowed = len(candidates) < len(standards)
+        note_call(narrowed)
+        if not narrowed:  # 全零信号等退化情形:窄化无意义,给全集
+            return standards, None
+        cand_tree = filter_tree(tree, set(candidates))
+        if not cand_tree:
+            # 标准标签不在大类树里(配置不一致):裁完是空的,退回全集提示词
+            return standards, None
+        return candidates, cand_tree
 
     @staticmethod
     def _existing_topic_samples(

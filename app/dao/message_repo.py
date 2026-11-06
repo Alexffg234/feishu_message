@@ -357,6 +357,32 @@ class MessageRepo:
                 break
         return list(samples.items())
 
+    def get_label_exemplars(
+        self, labels: list[str], per_label: int = 3, scan: int = 3000
+    ) -> dict[str, list[str]]:
+        """为给定标签各取最近 per_label 条消息文本,供候选召回打分。
+
+        单次查询扫最近 scan 条已打标消息再在内存分桶(避免 41 个标签 41 次查询)。
+        只用于召回排序:样例少只会让分数略钝,不影响正确性。
+        """
+        out: dict[str, list[str]] = {}
+        if not labels or per_label <= 0:
+            return out
+        stmt = (
+            select(Message.topic, Message.text)
+            .where(Message.topic.in_(labels))
+            .order_by(Message.id.desc())
+            .limit(scan)
+        )
+        for topic, text in self._session.execute(stmt):
+            bucket = out.setdefault(topic, [])
+            if len(bucket) >= per_label:
+                continue
+            t = (text or "").strip()
+            if t:
+                bucket.append(t[:200])
+        return out
+
     def list_recent_before(
         self, chat_id: str, before_id: int, limit: int = 6
     ) -> list:

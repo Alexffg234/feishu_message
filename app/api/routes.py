@@ -542,11 +542,16 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     - stitching: 缝合确认率 = 确定性 case_key 命中 / (case_key + LLM) 判定总数,
       衡量确定性锚点接管比例(进程内累计近似,见 conv_stitch.get_stitch_counts)
     - false_merge_sample: 误合率需人工复核,此处返回抽样状态占位(不自动判定)
+    - unclassified: 未分类组数/占比(闭集判别上线后最需要盯的指标:非标准标签被
+      拒会静默落成未分类,不盯就会越堆越多)
+    - standard_coverage: 标准标签被用到的比例(闭集覆盖不到的现象 = 长期未分类)
+    - confidence: 已归类组的置信度分布(取组内最大 topic_conf),供低置信复核排期
     """
-    from sqlalchemy import func
+    from sqlalchemy import case, func
 
     from app.services.conv_stitch import get_stitch_counts
     from app.services.label_norm import get_norm_stats
+    from app.services.topic_service import get_standard_labels
 
     # ---- 标签分布:每 (chat_id, topic) 的分组数(组=distinct root_message_id) ----
     #     每个 (chat, topic) 的理想终态是 1 组(碎片已并回原问题块/缝合已关联)。
@@ -586,6 +591,41 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
     stitch_total = ck + llm_n
     stitch_confirm_rate = round(ck / stitch_total, 4) if stitch_total else 0.0
 
+    # ---- 未分类率 + 置信度分布(组维度:一个组只要有非空 topic 即算已归类) ----
+    group_rows = (
+        db.query(
+            Message.chat_id,
+            Message.root_message_id,
+            func.max(case((Message.topic != "", 1), else_=0)),
+            func.max(Message.topic_conf),
+        )
+        .where(Message.root_message_id != "")
+        .group_by(Message.chat_id, Message.root_message_id)
+        .all()
+    )
+    total_groups = len(group_rows)
+    labeled_groups = sum(1 for r in group_rows if r[2])
+    unclassified_groups = total_groups - labeled_groups
+    # 置信度分档:高(≥0.8)自动 / 中(0.5~0.8)待复核 / 低(0~0.5)转人工 / 无(0=旧格式)
+    conf_buckets = {"high": 0, "medium": 0, "low": 0, "none": 0}
+    for _c, _r, labeled, conf in group_rows:
+        if not labeled:
+            continue
+        c = float(conf or 0.0)
+        if c <= 0:
+            conf_buckets["none"] += 1
+        elif c >= 0.8:
+            conf_buckets["high"] += 1
+        elif c >= 0.5:
+            conf_buckets["medium"] += 1
+        else:
+            conf_buckets["low"] += 1
+
+    # ---- 标准标签覆盖率 ----
+    standards = set(get_standard_labels(db))
+    used_labels = {t for (_c, t) in ct_groups}
+    covered = len(standards & used_labels)
+
     return {
         "topic_count": int(topic_count),
         "low_frequency_topic_count": int(low_freq),
@@ -602,6 +642,20 @@ def api_topic_metrics(db: Session = Depends(get_session)) -> dict:
         "remaining_fragmented_topics": sum(1 for n in ct_groups.values() if n > 1),
         "stitch_confirm_rate": stitch_confirm_rate,
         "stitching": {"case_key": ck, "llm": llm_n},
+        "unclassified": {
+            "groups": int(unclassified_groups),
+            "total_groups": int(total_groups),
+            "rate": (
+                round(unclassified_groups / total_groups, 4) if total_groups else 0.0
+            ),
+        },
+        "standard_coverage": {
+            "standard_count": len(standards),
+            "used_standard_count": covered,
+            "rate": round(covered / len(standards), 4) if standards else 0.0,
+            "unused_standards": sorted(standards - used_labels)[:20],
+        },
+        "confidence": conf_buckets,
         "false_merge_sample": {
             "status": "needs_manual_review",
             "sample_size": 0,

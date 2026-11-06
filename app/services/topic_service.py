@@ -175,6 +175,11 @@ class TopicService:
         """
         if not self.enabled:
             return False
+        # 已打标组来了新消息:只做零成本回填,不再调 LLM。
+        # 旧行为是 _try_claim 见 group_has_topic 直接跳过,导致「组已有标签」之后
+        # 到达的消息永远 topic="",同一组内标签不一致(审计:14 组/40 条)。
+        if not force and self.backfill_group_topic(chat_id, root_message_id):
+            return False
         key = (chat_id, root_message_id)
         # 进程内快速去重/冷却(单 worker 内第一道防线,兼供 wait_idle 使用)
         now = time.monotonic()
@@ -190,6 +195,44 @@ class TopicService:
             self._pending.add(key)
         self._executor.submit(self._classify_worker, chat_id, root_message_id)
         return True
+
+    def backfill_group_topic(self, chat_id: str, root_message_id: str) -> bool:
+        """组内已有标签时,把后到消息的空 topic 补成该标签(零 LLM)。
+
+        返回 True 表示本组已带标签(已回填完毕,不需要再走 LLM 分类)。
+        返回 False 表示本组还没标签,应走正常分类流程。
+
+        顺带修好另一个不一致:conversations.topic 为空而消息有标签的组
+        (审计 19 组,页面读到恒为空),一并按组内标签补齐。
+        """
+        try:
+            with self._session_factory() as session:
+                repo = MessageRepo(session)
+                rows = repo.list_by_root(root_message_id, chat_id)
+                topic = next(((m.topic or "") for m in rows if (m.topic or "")), "")
+                if not topic:
+                    return False
+                missing = sum(1 for m in rows if not (m.topic or ""))
+                if missing:
+                    repo.set_topic_for_group(chat_id, root_message_id, topic)
+                    logger.info(
+                        "回填组内空标签 %s/%s -> %r (%d 条)",
+                        chat_id,
+                        root_message_id,
+                        topic,
+                        missing,
+                    )
+                conv_repo = ConversationRepo(session)
+                conv = conv_repo.get(chat_id, root_message_id)
+                if conv is not None and not (conv.topic or ""):
+                    conv_repo.set_topic(chat_id, root_message_id, topic)
+                session.commit()
+                return True
+        except Exception:  # noqa: BLE001 - 回填失败不影响入库,退回正常分类流程
+            logger.warning(
+                "回填组内空标签失败 %s/%s,走正常分类", chat_id, root_message_id
+            )
+            return False
 
     def _try_claim(
         self, chat_id: str, root_message_id: str, force: bool = False

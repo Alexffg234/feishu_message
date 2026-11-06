@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.message import Message
@@ -221,6 +221,61 @@ class MessageRepo:
             stmt = stmt.where(Message.chat_id == chat_id)
         stmt = stmt.order_by(Message.received_at.asc(), Message.id.asc()).limit(limit)
         return list(self._session.scalars(stmt).all())
+
+    def count_unclassified_roots(self, chat_id: str | None = None) -> int:
+        """未分类组总数(整组无任何非空 topic)。"""
+        labeled = func.max(case((Message.topic != "", 1), else_=0)).label("labeled")
+        sub = select(Message.chat_id, Message.root_message_id).where(
+            Message.root_message_id != ""
+        )
+        if chat_id:
+            sub = sub.where(Message.chat_id == chat_id)
+        sub = sub.group_by(Message.chat_id, Message.root_message_id).having(
+            labeled == 0
+        ).subquery()
+        return int(
+            self._session.execute(select(func.count()).select_from(sub)).scalar() or 0
+        )
+
+
+    def list_unclassified_roots(
+        self, chat_id: str | None = None, limit: int = 200
+    ) -> list[dict]:
+        """列出「整组都没有 topic」的回复链组(未分类清单)。
+
+        注意 list_topics 只查 topic != '' 的行,看不到「没打上标签的组」——
+        闭集判别上线后这批会静默堆积,故单列此查询。
+        返回 [{"chat_id","root_message_id","message_count","first_message_id",
+                "start_time"}],按组内最早消息 id 倒序(新的在前)。
+        """
+        labeled = func.max(case((Message.topic != "", 1), else_=0))
+        first_id = func.min(Message.id).label("first_id")
+        stmt = (
+            select(
+                Message.chat_id,
+                Message.root_message_id,
+                func.count(Message.id).label("n"),
+                first_id,
+                func.min(Message.create_time).label("start"),
+            )
+            .where(Message.root_message_id != "")
+            .group_by(Message.chat_id, Message.root_message_id)
+            .having(labeled == 0)
+            .order_by(first_id.desc())
+            .limit(limit)
+        )
+        if chat_id:
+            stmt = stmt.where(Message.chat_id == chat_id)
+        return [
+            {
+                "chat_id": r[0],
+                "root_message_id": r[1],
+                "message_count": int(r[2] or 0),
+                "first_message_id": int(r[3] or 0),
+                "start_time": r[4] or "",
+            }
+            for r in self._session.execute(stmt).all()
+        ]
 
     def list_topic_roots(self, chat_id: str, topic: str) -> list[tuple[str, int]]:
         """同群同 topic 的所有分组,返回 [(root_message_id, first_message_id)]。

@@ -495,6 +495,12 @@ GET /health -> {"status":"ok"}
 
 ### 2026-11-06
 
+- **`5a9cf10` feat(ingest): 入库侧问题单元护栏——回复久无动静的旧组时新起一组**
+  - `_resolve_root` 原来对回复消息无条件并入父消息所在组,「点着三天前的消息回复、问的却是全新问题」会把新问题挂进旧对话——这是畸形巨型对话唯一的**长出入口**,`split_cases.py` 只能事后修补
+  - 新增配置 `case_split_gap_seconds`(默认 7200):整组**最后一条消息**距当前超过阈值即新起一组;判据用整组最后一条而非被回复那条(组内刚有人说话说明这轮还没结束);时间不可解析/`gap<=0` 按旧行为并入
+  - 新增 `MessageRepo.group_last_create_time`(只取 `max(create_time)` 聚合,不加载整组);`_attach_conversation` 修正跨组边 `depth`(父不在本组按 1 记,否则抄父树深度会让根消息显示「深度 4」)
+  - 只做物理新起一组,「是否仍属同一案例」交给 `conversations.case_id` 软关联(可解绑)
+  - 新增 `tests/test_reply_gap_guard.py`(5 项)
 - **`117e919` feat(topic): 未分类治理——相似度兜底 / 组内空标签回填 / 未分类清单**
   - 相似度兜底默认开启(`topic_alias_sim_threshold` 0 → 0.65):闭集要求输出标准标签原文,但常有 near-miss(「画面模糊」vs「画面模糊类问题」dice=0.67),不给兜底就被闭集判死成未分类;兜底后仍有闭集校验,映射不到只落回未分类,不会写脏标签
   - `TopicService.backfill_group_topic`:已打标组来了新消息只做零成本回填(补 `topic` + 同步 `conversations.topic`),不再调 LLM——修掉「组已有标签后新消息永远 topic=""」(14 组/40 条)与 `conversations.topic` 为空(19 组)两个存量不一致
